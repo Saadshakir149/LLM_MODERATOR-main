@@ -1,0 +1,58 @@
+{
+  "_meta": {
+    "title": "Active vs Passive LLM Moderator in 3-Person Chats (Desert Survival)",
+    "version": "preregistration-v1",
+    "status": "POPULATED FROM PI DESIGN DOC — review, set the items marked PI_SET, then lock (preregistration.lock()).",
+    "locked": false,
+    "design": "Randomized controlled experiment; unit of randomization = triad (group); between-subjects.",
+    "self_report": "NOT collected in this study — objective/behavioral measures only.",
+    "notes": "RQs/DVs/analysis transcribed from the PI's design document. Behavioral metrics are produced by research_metrics_v2.py (frozen). Items marked PI_SET need a numeric threshold from the PI before locking."
+  },
+
+  "research_questions": {
+    "RQ1": "How does active vs passive LLM moderation change participation inequality in triads? (message/word share, turn-taking balance, Gini on word share)",
+    "RQ2": "Does active vs passive moderation change the rate and resolution of conflict episodes (interruptions, negative phrasing, repair moves, time-to-repair)?",
+    "RQ3": "Which moderator interventions (direct invitation, summarization, timeboxing, norm reminder) predict near-term behavioral change (e.g., a quiet member speaks within 120s), and do these links differ by policy?",
+    "RQ4": "What efficiency trade-offs arise from active moderation (total messages/words, time-to-consensus, moderator share of turns) and do they offset gains in balance/safety?"
+  },
+
+  "hypotheses": {
+    "H1": "Active moderation increases participation equality (lower word-share Gini / dominance gap; higher entropy) vs passive.",
+    "H2": "Active moderation changes conflict dynamics — more repair moves and faster time-to-repair vs passive.",
+    "H3": "Active moderation increases behavioral inclusion (more balanced contribution from quieter members), with a possible efficiency/autonomy trade-off (more moderator turns, longer time-to-consensus)."
+  },
+
+  "conditions": ["active_moderator", "passive_moderator"],
+  "condition_notes": "Two between-subjects conditions, group-randomized. (The platform also supports 'no_moderator', which is NOT used in this study.)",
+
+  "dependent_variables": {
+    "participation_equality_PRIMARY": ["word_gini", "word_dominance_gap", "word_entropy"],
+    "participation_equality_secondary": ["turn_gini", "turn_entropy", "dominance_gap", "time_gini", "time_entropy"],
+    "participation_quantity": ["message_count", "word_count", "word_share", "turn_share"],
+    "turn_taking": ["turn_count", "avg_turn_duration_ms", "longest_silence_sec", "avg_silence_sec"],
+    "conflict_RQ2": ["conflict_count", "repair_count", "repair_rate", "mean_time_to_repair_seconds", "interruption_estimate"],
+    "mechanisms_RQ3": ["interventions_by_type", "moderator_median_latency_sec", "intervention_followup (quiet member speaks within window)"],
+    "efficiency_RQ4": ["time_to_consensus / session_minutes", "total_student_messages", "total_words", "moderator share of turns", "interventions_per_minute"]
+  },
+
+  "exclusion_criteria": [
+    "Incomplete sessions (finalization status != COMPLETE).",
+    "Bot failures / connectivity drops (from failure_report).",
+    "Groups with fewer than PI_SET total messages (non-engagement threshold — PI to set, e.g. 20).",
+    "Experiment-condition drift detected (condition_audit failed).",
+    "Fewer than 3 enrolled participants."
+  ],
+
+  "analysis_plan": "Data nested (participants within groups). Primary group-level outcome = word-share Gini: Active vs Passive via group-level t-test or regression. Participant-level outcomes: linear mixed-effects models with a random intercept for group. RQ3 mechanisms: event-aligned windows / hazard-latency models for intervention -> near-term response, compared across conditions. RQ4: compare efficiency DVs across conditions. PI to finalize exact tests, multiple-comparison correction, and power/sample target before locking.",
+
+  "sample_plan": "Pilot 8-12 groups/condition (16-24 total) for manipulation + feasibility; main study 25-40 groups/condition (>=20/condition acceptable for moderate effects).",
+
+  "task": "Desert Survival: a triad ranks the recovered items from 1 (most important) to 12 (least) and agrees on ONE final group ranking within 15-20 minutes. NOTE (PI_SET): the design doc lists 8 items but states 12 — reconcile the canonical item list before launch.",
+
+  "instrument_lock": {
+    "metric_definitions": "frozen — research_metrics_v2.py (8.5 LOCKED docstrings); PRIMARY Gini = word share.",
+    "intervention_policy": "frozen — INTERVENTION_POLICY.md",
+    "dataset_schema": "frozen — DATASET_SCHEMA.md",
+    "reproducibility": "guaranteed — REPRODUCIBILITY.md"
+  }
+}
