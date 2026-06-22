@@ -166,6 +166,60 @@ const toSpeechText = (raw) => {
   return t;
 };
 
+// Canonical per-message key — MUST match the `sid` the socket handler uses to enqueue
+// TTS, so voice-note playback status (queued/playing/played) lines up with the queue.
+const msgKey = (msg) =>
+  msg && msg.id != null
+    ? String(msg.id)
+    : `${msg?.sender}|${msg?.message}|${msg?.timestamp || ""}`;
+
+// Classify a Moderator message for the voice-first UI:
+//   'task'   → the HTML task-intro card (items + instructions); stays a visual card.
+//   'notice' → short system/time announcements ("5 minutes remaining"); stays a card.
+//   'voice'  → a conversational moderator turn; rendered as a voice note.
+// Structural signals (content_format/message_type) are authoritative when present
+// (always on history, and on the live task-card emit). Live announcements carry no
+// type, so a conservative glyph+keyword heuristic catches them without misclassifying
+// ordinary conversation.
+const MODERATOR_NOTICE_GLYPHS = ["⏰", "⚠️", "⚠", "✅", "🏁", "🛑"];
+const MODERATOR_NOTICE_RE = /(remaining|minute|min left|recorded|finaliz|ranking|inferring)/i;
+const classifyModerator = (msg) => {
+  const m = typeof msg?.message === "string" ? msg.message : "";
+  if (
+    msg?.content_format === "html" ||
+    msg?.message_type === "task" ||
+    m.includes('class="task-intro"')
+  ) {
+    return "task";
+  }
+  if (msg?.message_type === "system") return "notice";
+  const t = m.trimStart();
+  if (MODERATOR_NOTICE_GLYPHS.some((g) => t.startsWith(g)) && MODERATOR_NOTICE_RE.test(t)) {
+    return "notice";
+  }
+  return "voice";
+};
+
+// Deterministic pseudo-waveform bar heights (0.3..1) seeded from the message text, so a
+// note's waveform is stable across re-renders but varies between messages.
+const waveformBars = (seed, count = 32) => {
+  const s = seed || "moderator";
+  const bars = new Array(count);
+  for (let i = 0; i < count; i++) {
+    const c = s.charCodeAt(i % s.length) || 60;
+    const v = ((c * (i + 7) * 31) % 100) / 100; // 0..1
+    bars[i] = 0.3 + v * 0.7;
+  }
+  return bars;
+};
+
+const formatClock = (secs) => {
+  if (!secs || !isFinite(secs) || secs < 0) return "0:00";
+  const m = Math.floor(secs / 60);
+  const s = Math.floor(secs % 60);
+  return `${m}:${String(s).padStart(2, "0")}`;
+};
+
 const MARKDOWN_COMPONENTS = {
   p: ({ children, ...rest }) => (
     <p className="mb-2 last:mb-0 text-sm leading-relaxed" {...rest}>
@@ -296,7 +350,7 @@ function ChatMessageBody({ msg, isCurrentUser, onPlayVoice, onSpeak }) {
       <div className="flex items-start gap-2">
         <button
           type="button"
-          onClick={() => onSpeak(msg.message)}
+          onClick={() => onSpeak(String(msg.id ?? msg.message), msg.message)}
           title="Play the moderator's voice"
           className="flex-shrink-0 mt-0.5 w-7 h-7 rounded-full flex items-center justify-center bg-amber-100 hover:bg-amber-200 text-amber-700 transition-colors"
         >
@@ -307,6 +361,147 @@ function ChatMessageBody({ msg, isCurrentUser, onPlayVoice, onSpeak }) {
     );
   }
   return body;
+}
+
+// ============================================================
+// 🎙️ MODERATOR VOICE NOTE (Telegram-style; voice-first presentation)
+// ------------------------------------------------------------
+// Renders a conversational moderator turn as a voice note instead of a text bubble:
+// avatar (in the parent row), play/pause, an animated waveform that fills with playback
+// progress, a live status line (Speaking… / Queued / Played / Tap to play), duration,
+// and a collapsible "View transcript" for debugging + accessibility. The full transcript
+// is ALWAYS in the DOM (sr-only) so screen readers and research/analytics never lose it.
+// ============================================================
+function ModeratorVoiceNote({
+  msg,
+  status,        // 'playing' | 'queued' | 'played' | 'idle'
+  paused,        // true if the currently-playing clip is paused
+  progress,      // 0..1 (only meaningful while playing)
+  elapsed,       // seconds elapsed (while playing)
+  duration,      // seconds total (known after first play)
+  muted,
+  timestamp,
+  transcript,
+  expanded,
+  onToggleTranscript,
+  onPlayPause,
+  onSkip,
+}) {
+  const bars = useMemo(() => waveformBars(msgKey(msg)), [msg]);
+  const isPlaying = status === "playing";
+  const isQueued = status === "queued";
+  const isPlayed = status === "played";
+  const isActivePlaying = isPlaying && !paused;
+
+  // Per-bar fill: while playing, bars up to `progress` are lit; played → all lit;
+  // queued/idle → none lit (queued gently pulses to signal "waiting").
+  const litFraction = isPlaying ? progress : isPlayed ? 1 : 0;
+
+  const statusMeta = isPlaying
+    ? paused
+      ? { dot: "bg-amber-400", text: "text-amber-700", label: "Paused" }
+      : { dot: "bg-amber-500 animate-pulse", text: "text-amber-700", label: "Speaking…" }
+    : isQueued
+    ? { dot: "bg-indigo-400 animate-pulse", text: "text-indigo-600", label: "Queued" }
+    : isPlayed
+    ? { dot: "bg-emerald-500", text: "text-emerald-600", label: "Played" }
+    : { dot: "bg-slate-300", text: "text-slate-500", label: muted ? "Tap to play (muted)" : "Tap to play" };
+
+  const timeLabel = isPlaying
+    ? `${formatClock(elapsed)}${duration ? ` / ${formatClock(duration)}` : ""}`
+    : duration
+    ? formatClock(duration)
+    : "voice";
+
+  return (
+    <div className="min-w-0 w-full max-w-md">
+      <div className="flex items-center gap-2 mb-1.5 px-1">
+        <span className="font-bold text-xs text-amber-705">Moderator</span>
+        <span className="inline-flex items-center gap-1 text-[9px] font-bold uppercase tracking-wider text-amber-600 bg-amber-50 border border-amber-200 rounded-full px-1.5 py-0.5">
+          🎙️ Voice
+        </span>
+        <span className="text-[10px] text-slate-400 font-medium">{timestamp}</span>
+      </div>
+
+      <div
+        className={`rounded-2xl rounded-tl-none border px-3 py-2.5 shadow-sm transition-colors ${
+          isPlaying
+            ? "bg-amber-50 border-amber-300"
+            : "bg-amber-50/60 border-amber-200/80"
+        }`}
+      >
+        <div className="flex items-center gap-3">
+          {/* Play / Pause */}
+          <button
+            type="button"
+            onClick={onPlayPause}
+            aria-label={isActivePlaying ? "Pause moderator voice" : "Play moderator voice"}
+            className="flex-shrink-0 w-9 h-9 rounded-full flex items-center justify-center bg-amber-500 hover:bg-amber-600 text-white shadow-sm transition-colors text-base leading-none"
+          >
+            {isActivePlaying ? "⏸" : "▶"}
+          </button>
+
+          {/* Waveform */}
+          <div className="flex-1 min-w-0 flex items-center gap-[2px] h-8" aria-hidden="true">
+            {bars.map((h, i) => {
+              const lit = (i + 1) / bars.length <= litFraction;
+              return (
+                <span
+                  key={i}
+                  className={`flex-1 rounded-full transition-colors duration-150 ${
+                    lit ? "bg-amber-500" : isQueued ? "bg-amber-200 animate-pulse" : "bg-amber-200"
+                  }`}
+                  style={{ height: `${Math.round(h * 100)}%` }}
+                />
+              );
+            })}
+          </div>
+
+          {/* Duration / elapsed */}
+          <span className="flex-shrink-0 text-[10px] font-mono font-semibold text-amber-700 tabular-nums">
+            {timeLabel}
+          </span>
+        </div>
+
+        {/* Status line + Skip */}
+        <div className="flex items-center justify-between mt-2 px-0.5">
+          <span className={`inline-flex items-center gap-1.5 text-[10px] font-bold ${statusMeta.text}`}>
+            <span className={`w-1.5 h-1.5 rounded-full ${statusMeta.dot}`} />
+            {statusMeta.label}
+          </span>
+          <div className="flex items-center gap-2">
+            {isPlaying && onSkip && (
+              <button
+                type="button"
+                onClick={onSkip}
+                title="Skip to the next moderator message"
+                className="inline-flex items-center gap-1 text-[10px] font-bold text-amber-700 hover:text-amber-900 transition-colors"
+              >
+                ⏭ Skip
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={onToggleTranscript}
+              aria-expanded={expanded}
+              className="text-[10px] font-semibold text-slate-400 hover:text-slate-600 transition-colors"
+            >
+              {expanded ? "Hide transcript" : "View transcript"}
+            </button>
+          </div>
+        </div>
+
+        {expanded && (
+          <p className="mt-2 pt-2 border-t border-amber-200/70 text-[11px] leading-relaxed text-slate-600 whitespace-pre-wrap break-words">
+            {transcript}
+          </p>
+        )}
+      </div>
+
+      {/* Always-present transcript for screen readers / accessibility (visually hidden). */}
+      <p className="sr-only">Moderator voice message: {transcript}</p>
+    </div>
+  );
 }
 
 // ============================================================
@@ -432,10 +627,21 @@ export default function ChatRoom() {
   // automatically. The user's first PTT press is the gesture that unlocks audio.
   const [voiceOn, setVoiceOn] = useState(true);
   const [isSpeaking, setIsSpeaking] = useState(false); // drives the "Speaking" status
+  const [playingKey, setPlayingKey] = useState(null);  // key of the message currently playing
+  // Voice-note presentation state (drives the per-note waveform/status UI):
+  const [playback, setPlayback] = useState({ progress: 0, elapsed: 0, duration: 0 }); // current clip
+  const [voicePaused, setVoicePaused] = useState(false);  // currently-playing clip is paused
+  const [noteStatuses, setNoteStatuses] = useState({});   // msgKey → 'queued'|'playing'|'played'
+  const [noteDurations, setNoteDurations] = useState({}); // msgKey → seconds (captured on first play)
+  const [expandedTranscripts, setExpandedTranscripts] = useState({}); // msgKey → bool
   const voiceOnRef = useRef(true);           // mirror for the long-lived socket handler
-  const audioQueueRef = useRef([]);          // pending speech texts (FIFO)
+  const audioQueueRef = useRef([]);          // pending FIFO of { key, text }
   const audioPlayingRef = useRef(false);     // a clip is currently playing
   const spokenIdsRef = useRef(new Set());    // message ids already queued (no repeats)
+  const ttsCacheRef = useRef(new Map());     // spoken text → blob object URL (skip refetch on replay)
+  const ttsPrewarmRef = useRef(new Map());   // spoken text → { promise, controller } for in-flight pre-warm
+  const playbackEpochRef = useRef(0);        // bumped on stop/skip to cancel in-flight plays
+  const playNextRef = useRef(null);          // latest playNextInQueue, for unlock-time resume
 
   // ONE reusable <audio> element. Reusing a single element (not new Audio() each time)
   // lets us "unlock" it once on a user gesture so playback works AFTER the async /tts
@@ -449,87 +655,379 @@ export default function ChatRoom() {
     return audioElRef.current;
   }, []);
 
+  // Set (or clear, with status=null) a voice note's playback status. Stable identity so it
+  // can sit in the dependency lists of the queue callbacks without churning them.
+  const markNote = useCallback((key, status) => {
+    if (!key) return;
+    setNoteStatuses((prev) => {
+      if (status == null) {
+        if (!(key in prev)) return prev;
+        const next = { ...prev };
+        delete next[key];
+        return next;
+      }
+      if (prev[key] === status) return prev;
+      return { ...prev, [key]: status };
+    });
+  }, []);
+
   // Call from ANY user gesture (mic press, Play/Voice buttons) to enable audio output.
   const unlockAudio = useCallback(() => {
     if (audioUnlockedRef.current) return;
     const el = getAudioEl();
+    const finish = () => {
+      audioUnlockedRef.current = true;
+      console.log("[AUDIO] ✅ audio UNLOCKED — draining any held queue");
+      if (playNextRef.current) playNextRef.current();
+    };
     try {
       el.src =
         "data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAESsAACJWAAACABAAZGF0YQAAAAA=";
       const p = el.play();
       if (p && p.then) {
-        p.then(() => { try { el.pause(); el.currentTime = 0; } catch (_) {} audioUnlockedRef.current = true; })
-         .catch(() => { /* retry on next gesture */ });
+        p.then(() => { try { el.pause(); el.currentTime = 0; } catch (_) {} finish(); })
+         .catch(() => { /* autoplay blocked — retry on next gesture */ });
       } else {
-        audioUnlockedRef.current = true;
+        finish();
       }
     } catch (_) { /* ignore */ }
   }, [getAudioEl]);
+
+  // Robust unlock safety-net: the FIRST user interaction anywhere on the page unlocks
+  // audio — not just the mic/Play/Voice buttons. This guarantees the queue can never stay
+  // deadlocked with audioUnlockedRef=false just because the user happened to click/scroll
+  // somewhere else first. unlockAudio() drains any held queue on success and is a no-op
+  // once unlocked, so these listeners are pure belt-and-suspenders.
+  useEffect(() => {
+    if (audioUnlockedRef.current) return undefined;
+    const onFirstGesture = () => {
+      console.log("[AUDIO] first user gesture → unlocking audio");
+      unlockAudio();
+    };
+    const opts = { passive: true };
+    window.addEventListener("pointerdown", onFirstGesture, opts);
+    window.addEventListener("keydown", onFirstGesture, opts);
+    window.addEventListener("touchstart", onFirstGesture, opts);
+    return () => {
+      window.removeEventListener("pointerdown", onFirstGesture);
+      window.removeEventListener("keydown", onFirstGesture);
+      window.removeEventListener("touchstart", onFirstGesture);
+    };
+  }, [unlockAudio]);
 
   useEffect(() => {
     voiceOnRef.current = voiceOn;
   }, [voiceOn]);
 
+  // ⏹ Stop ALL audio instantly: pause, reset, clear the queue and all in-flight pre-warm
+  // fetches, reset button state. Does NOT clear the TTS blob cache — clips stay reusable.
   const stopAndClearVoice = useCallback(() => {
+    playbackEpochRef.current += 1;
     audioQueueRef.current = [];
+    // Cancel every in-flight pre-warm request — they're for messages we just discarded.
+    for (const { controller } of ttsPrewarmRef.current.values()) {
+      try { controller.abort(); } catch (_) { /* ignore */ }
+    }
+    ttsPrewarmRef.current.clear();
     const el = audioElRef.current;
-    if (el) { try { el.pause(); } catch (_) { /* ignore */ } }
+    if (el) {
+      try { el.pause(); el.currentTime = 0; el.onended = null; el.onerror = null; el.ontimeupdate = null; } catch (_) { /* ignore */ }
+    }
     audioPlayingRef.current = false;
     setIsSpeaking(false);
+    setPlayingKey(null);
+    setPlayback({ progress: 0, elapsed: 0, duration: 0 });
+    setVoicePaused(false);
+    // Drop 'queued'/'playing' badges (those clips are gone) but keep 'played' history so
+    // notes that already spoke stay marked. Surviving notes render as tap-to-play.
+    setNoteStatuses((prev) => {
+      const next = {};
+      for (const k in prev) if (prev[k] === "played") next[k] = "played";
+      return next;
+    });
   }, []);
 
+  // Pre-warm TTS for the SINGLE next clip while the current one plays. Stores the
+  // fetch promise in ttsPrewarmRef so playNextInQueue can await it instead of starting
+  // a fresh request — hiding TTS latency for every clip after the first.
+  //
+  // Hard cap of ONE in-flight pre-warm at a time: warming every queued message on
+  // arrival (the previous behavior) overlaid many concurrent /tts requests on the
+  // backend, starving the independent /stt request on the concurrency-limited dev
+  // server and freezing transcription after the first turn. Pipelining one-ahead keeps
+  // backend load at ≤1 TTS request — the original, working profile.
+  const prewarmTTS = useCallback((cleanText) => {
+    if (!cleanText) return;
+    if (ttsCacheRef.current.has(cleanText)) return;       // already cached
+    if (ttsPrewarmRef.current.has(cleanText)) return;     // already warming
+    if (ttsPrewarmRef.current.size >= 1) return;          // cap: one pre-warm at a time
+    const controller = new AbortController();
+    // Hard cap: if the server hangs, the promise resolves to null and playNextInQueue
+    // falls through to a fresh fetch rather than blocking forever. Roman Urdu (slow Uplift
+    // + transliteration) needs a generous window so the PRE-WARM actually completes and
+    // hides the latency; the old 10s cap aborted it every time, forcing a cold main fetch.
+    const prewarmTimeoutMs = joinLanguage === "roman_urdu" ? 75000 : 10000;
+    const timeoutId = setTimeout(() => controller.abort(), prewarmTimeoutMs);
+    console.log(`[TTS] prewarm START chars=${cleanText.length}`);
+    const promise = fetch(`${API_BASE}/tts`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text: cleanText, room_id: roomId }),
+      signal: controller.signal,
+    })
+      .then(async (res) => {
+        clearTimeout(timeoutId);
+        console.log(`[TTS] prewarm DONE status=${res.status} ok=${res.ok}`);
+        if (!res.ok) return null;
+        const blob = await res.blob();
+        // A blob smaller than 100 bytes is a server-side error body, not audio.
+        // Storing it would permanently cache a bad URL for this text.
+        console.log(`[TTS] prewarm blob size=${blob ? blob.size : 0}`);
+        if (!blob || blob.size < 100) return null;
+        const url = URL.createObjectURL(blob);
+        ttsCacheRef.current.set(cleanText, url);  // populate main cache
+        return url;
+      })
+      .catch((err) => { clearTimeout(timeoutId); console.warn(`[TTS] prewarm aborted/failed: ${err?.message || err}`); return null; });  // abort/network → null, fall back to fresh fetch
+    ttsPrewarmRef.current.set(cleanText, { promise, controller });
+  }, [roomId, joinLanguage]);
+
   // Play the next queued clip on the single element; chains via onended (no overlap).
+  // Hardened against: (1) autoplay lock — if audio isn't unlocked yet we leave the queue
+  // intact and bail; unlockAudio() resumes us, so the intro that arrives when 3 join is
+  // never lost. (2) stop/skip during the async /tts fetch — an epoch token makes the stale
+  // attempt abort without touching shared state. (3) playback/network errors — we advance
+  // to the next clip instead of deadlocking. (4) pre-warmed TTS — if a fetch is in-flight
+  // from prewarmTTS, we await it instead of starting a duplicate request.
   const playNextInQueue = useCallback(async () => {
     if (audioPlayingRef.current) return;
-    const text = audioQueueRef.current.shift();
-    if (text == null) { setIsSpeaking(false); return; }
+    if (audioQueueRef.current.length === 0) {
+      setIsSpeaking(false);
+      setPlayingKey(null);
+      return;
+    }
+    if (!audioUnlockedRef.current) {
+      // Browser autoplay policy: audio can't start until a user gesture unlocks it.
+      // The queue is preserved; unlockAudio() (first mic/Play tap) resumes it.
+      console.log(`[AUDIO] ⏸ queue HELD — audio not unlocked yet (waiting for a user gesture). queueLen=${audioQueueRef.current.length}`);
+      setIsSpeaking(false);
+      return;
+    }
+    const item = audioQueueRef.current.shift();
+    console.log(`[QUEUE] ▶ dequeued key=${item.key} remaining=${audioQueueRef.current.length}`);
     audioPlayingRef.current = true;
     setIsSpeaking(true);
-    let url = null;
-    try {
-      const res = await fetch(`${API_BASE}/tts`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text, room_id: roomId }),
-      });
-      if (!res.ok) throw new Error(`TTS ${res.status}`);
-      const blob = await res.blob();
-      url = URL.createObjectURL(blob);
-      const el = getAudioEl();
-      el.src = url;
-      const advance = () => {
-        try { URL.revokeObjectURL(url); } catch (_) { /* ignore */ }
-        el.onended = null; el.onerror = null;
-        audioPlayingRef.current = false;
-        playNextInQueue();
-      };
-      el.onended = advance;
-      el.onerror = advance;
-      await el.play();
-    } catch (e) {
-      // Most likely autoplay still locked (no gesture yet) — stop, don't spam /tts.
-      console.warn("🔇 Voice playback skipped (tap ▶ to play):", e?.message || e);
-      if (url) { try { URL.revokeObjectURL(url); } catch (_) { /* ignore */ } }
-      audioPlayingRef.current = false;
-      setIsSpeaking(false);
-    }
-  }, [roomId, getAudioEl]);
+    setPlayingKey(item.key);
+    markNote(item.key, "playing");
+    setPlayback({ progress: 0, elapsed: 0, duration: 0 });
+    setVoicePaused(false);
+    const epoch = playbackEpochRef.current;
+    const t0 = performance.now();
 
-  const enqueueModeratorSpeech = useCallback((rawText) => {
-    const clean = toSpeechText(rawText);
-    if (!clean) return;
-    audioQueueRef.current.push(clean);
-    playNextInQueue();
+    // One-shot advance: called by onended, onerror, AND the catch block.
+    // Hoisted here so both the DOM event path and the exception path share the
+    // same fired flag — prevents double-calls that corrupt queue state or clear
+    // handlers registered by the next in-flight playNextInQueue call.
+    let advanceFired = false;
+    let elForAdvance = null;
+    const advance = (reason) => {
+      if (advanceFired) return;
+      advanceFired = true;
+      console.log(`[QUEUE] advance(${reason}) key=${item.key} → draining; queueLen=${audioQueueRef.current.length}`);
+      if (elForAdvance) { elForAdvance.onended = null; elForAdvance.onerror = null; elForAdvance.ontimeupdate = null; }
+      audioPlayingRef.current = false;
+      setPlayingKey(null);
+      setPlayback({ progress: 0, elapsed: 0, duration: 0 });
+      if (reason === "error") {
+        // Evict the cached URL so the next attempt fetches fresh audio instead of
+        // replaying a corrupt blob. Clear the badge so the note shows as tap-to-play.
+        markNote(item.key, null);
+        const cachedUrl = ttsCacheRef.current.get(item.text);
+        if (cachedUrl && cachedUrl.startsWith("blob:")) {
+          ttsCacheRef.current.delete(item.text);
+          try { URL.revokeObjectURL(cachedUrl); } catch (_) { /* ignore */ }
+        }
+      } else {
+        markNote(item.key, "played");
+        const dur = elForAdvance && isFinite(elForAdvance.duration) ? elForAdvance.duration : 0;
+        if (dur) setNoteDurations((prev) => (prev[item.key] === dur ? prev : { ...prev, [item.key]: dur }));
+      }
+      playNextInQueue();
+    };
+
+    try {
+      let url = ttsCacheRef.current.get(item.text);
+      if (url) {
+        console.log(`[TTS] cache HIT (client blob) key=${item.key}`);
+      }
+      if (!url) {
+        // Reuse an in-flight pre-warm promise if one exists (started while prev clip played)
+        const prewarm = ttsPrewarmRef.current.get(item.text);
+        if (prewarm) {
+          console.log(`[TTS] awaiting in-flight prewarm key=${item.key}`);
+          url = await prewarm.promise;
+          ttsPrewarmRef.current.delete(item.text);
+          console.log(`[TTS] prewarm resolved key=${item.key} url=${url ? "ok" : "null"}`);
+        }
+      }
+      if (!url) {
+        console.log(`[TTS] fetch START key=${item.key} chars=${item.text.length}`);
+        // Hard timeout so a slow/hung backend can NEVER strand playback. The prewarm
+        // (10s) and STT (40s) already do this; the main fetch previously had none, so a
+        // slow cold synthesis (e.g. Roman Urdu via Uplift) left the clip silent forever.
+        // On timeout we throw → advance("error"), and the note stays tap-to-play.
+        const ttsController = new AbortController();
+        // Roman Urdu (Uplift + Urdu-script transliteration) can take tens of seconds for a
+        // long line — too slow for the 25s English cap, which was aborting mid-synthesis
+        // ("signal is aborted without reason"). Give the Urdu path a generous window; keep
+        // English (OpenAI, ~1s) fast-fail. This is the safety net; the pre-warm usually wins.
+        const ttsFetchTimeoutMs = joinLanguage === "roman_urdu" ? 75000 : 25000;
+        const ttsTimeout = setTimeout(() => ttsController.abort(), ttsFetchTimeoutMs);
+        let res;
+        try {
+          res = await fetch(`${API_BASE}/tts`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ text: item.text, room_id: roomId }),
+            signal: ttsController.signal,
+          });
+        } finally {
+          clearTimeout(ttsTimeout);
+        }
+        console.log(`[TTS] fetch DONE key=${item.key} status=${res.status} ok=${res.ok}`);
+        if (!res.ok) throw new Error(`TTS ${res.status}`);
+        const blob = await res.blob();
+        console.log(`[TTS] blob key=${item.key} size=${blob ? blob.size : 0} type=${blob ? blob.type : "-"}`);
+        if (!blob || blob.size < 100) throw new Error("TTS returned empty audio");
+        url = URL.createObjectURL(blob);
+        console.log(`[AUDIO] objectURL created key=${item.key}`);
+        ttsCacheRef.current.set(item.text, url);
+      }
+      if (epoch !== playbackEpochRef.current) {
+        console.log(`[QUEUE] stale epoch — abandoning key=${item.key} (stop/skip happened)`);
+        return;
+      }
+      console.log(`[TTS] ready key=${item.key} in ${Math.round(performance.now() - t0)}ms`);
+      const el = getAudioEl();
+      elForAdvance = el;
+      el.src = url;
+      el.onended = () => { console.log(`[AUDIO] onended key=${item.key}`); advance("ended"); };
+      el.onerror = () => { console.warn(`[AUDIO] onerror key=${item.key} code=${el.error ? el.error.code : "?"}`); advance("error"); };
+      // Drive the voice-note waveform fill + elapsed/duration readout (~4 Hz).
+      el.ontimeupdate = () => {
+        const d = isFinite(el.duration) ? el.duration : 0;
+        const ct = el.currentTime || 0;
+        setPlayback({ progress: d ? Math.min(1, ct / d) : 0, elapsed: ct, duration: d });
+      };
+      console.log(`[AUDIO] play() called key=${item.key} unlocked=${audioUnlockedRef.current}`);
+      await el.play();
+      console.log(`[AUDIO] play() resolved — audio started key=${item.key}`);
+      // Pipeline: now that this clip is playing, warm the NEXT queued clip (one only,
+      // enforced by prewarmTTS's cap) so its audio is ready the moment this one ends.
+      const next = audioQueueRef.current[0];
+      if (next) prewarmTTS(next.text);
+    } catch (e) {
+      if (epoch !== playbackEpochRef.current) return;
+      console.warn(`[AUDIO] play/fetch REJECTED key=${item.key}:`, e?.message || e);
+      advance("error");
+    }
+  }, [roomId, getAudioEl, prewarmTTS, markNote, joinLanguage]);
+
+  // Keep a ref to the latest playNextInQueue so unlockAudio (defined above) can resume the
+  // queue after the first gesture without a forward reference.
+  useEffect(() => {
+    playNextRef.current = playNextInQueue;
   }, [playNextInQueue]);
 
-  // ▶ Manually play one moderator message NOW (clears the queue). The click is a user
-  // gesture, so it unlocks audio for all subsequent auto-play too.
-  const playModeratorMessage = useCallback((rawText) => {
+  // ⏭ Skip the current clip and immediately play the next queued one (queue preserved).
+  const skipCurrent = useCallback(() => {
+    playbackEpochRef.current += 1;
+    const el = audioElRef.current;
+    if (el) {
+      try { el.pause(); el.currentTime = 0; el.onended = null; el.onerror = null; el.ontimeupdate = null; } catch (_) { /* ignore */ }
+    }
+    // The manually-paused clip won't fire onended, so mark it played here.
+    setPlayingKey((cur) => { if (cur) markNote(cur, "played"); return null; });
+    audioPlayingRef.current = false;
+    setPlayback({ progress: 0, elapsed: 0, duration: 0 });
+    setVoicePaused(false);
+    playNextInQueue();
+  }, [playNextInQueue, markNote]);
+
+  const enqueueModeratorSpeech = useCallback((key, rawText) => {
+    const clean = toSpeechText(rawText);
+    if (!clean) {
+      console.log(`[QUEUE] skip key=${key} — empty after toSpeechText`);
+      return;
+    }
+    if (audioQueueRef.current.some(item => item.text === clean)) {
+      console.log(`[QUEUE] skip key=${key} — identical text already queued`);
+      return;
+    }
+    audioQueueRef.current.push({ key, text: clean });
+    console.log(`[QUEUE] enqueued key=${key} len=${audioQueueRef.current.length} chars=${clean.length}`);
+    markNote(key, "queued");
+    // Kick off TTS synthesis the INSTANT this message enters the queue — before the
+    // playback state bookkeeping and the message-list re-render — so the audio request is
+    // already in flight at the earliest possible moment. This matters most for the common
+    // case: a single moderator reply arriving while the system is idle (every turn of a
+    // normal back-and-forth). playNextInQueue then awaits this in-flight fetch instead of
+    // starting its own, so there is no duplicate request and no extra wait.
+    //   • Idle  → this is the message about to play; synthesis starts now.
+    //   • Busy  → this is the next-to-play clip; it warms while the current one finishes.
+    // The one-at-a-time cap inside prewarmTTS still bounds backend load to ≤1 concurrent
+    // /tts request, preserving the fix that keeps /stt (transcription) from being starved.
+    prewarmTTS(clean);
+    playNextInQueue();
+  }, [playNextInQueue, prewarmTTS, markNote]);
+
+  // ▶ Play a specific moderator message NOW (clears the queue, stops current). The click
+  // is a user gesture, so it also unlocks audio for subsequent auto-play.
+  const playModeratorMessage = useCallback((key, rawText) => {
     unlockAudio();
+    playbackEpochRef.current += 1;           // cancel any in-flight fetch for old epoch
+    const el = audioElRef.current;
+    if (el) {
+      try { el.pause(); el.currentTime = 0; el.onended = null; el.onerror = null; el.ontimeupdate = null; } catch (_) { /* ignore */ }
+    }
     audioQueueRef.current = [];
     audioPlayingRef.current = false;
-    enqueueModeratorSpeech(rawText);
+    setPlayback({ progress: 0, elapsed: 0, duration: 0 });
+    // Replaying clears the previous queue, so drop other transient badges (keep 'played').
+    setNoteStatuses((prev) => {
+      const next = {};
+      for (const k in prev) if (prev[k] === "played") next[k] = "played";
+      return next;
+    });
+    enqueueModeratorSpeech(key, rawText);
   }, [unlockAudio, enqueueModeratorSpeech]);
+
+  // Expand/collapse a voice note's transcript (debug + accessibility disclosure).
+  const toggleTranscript = useCallback((key) => {
+    setExpandedTranscripts((prev) => ({ ...prev, [key]: !prev[key] }));
+  }, []);
+
+  // Pause/resume the clip that is currently playing (the shared audio element). Safe: it
+  // doesn't touch src/epoch/queue, so onended still advances once the clip finishes.
+  const togglePlayPauseCurrent = useCallback(() => {
+    const el = audioElRef.current;
+    if (!el) return;
+    if (el.paused) {
+      el.play().then(() => setVoicePaused(false)).catch(() => {});
+    } else {
+      el.pause();
+      setVoicePaused(true);
+    }
+  }, []);
+
+  // Voice-note tap handler: resume/pause the active note, or play a different one now.
+  const handleVoiceNoteTap = useCallback((key, rawText) => {
+    if (playingKey === key) {
+      togglePlayPauseCurrent();
+    } else {
+      playModeratorMessage(key, rawText);
+    }
+  }, [playingKey, togglePlayPauseCurrent, playModeratorMessage]);
 
   // ▶ Play the ORIGINAL recording for a voice message (participant playback).
   const playbackAudioRef = useRef(null);
@@ -551,6 +1049,17 @@ export default function ChatRoom() {
 
   // Stop audio + free blob URLs on unmount
   useEffect(() => stopAndClearVoice, [stopAndClearVoice]);
+
+  // Revoke every cached TTS blob URL on unmount (the cache, not playback, owns them now).
+  useEffect(() => {
+    const cache = ttsCacheRef.current;
+    return () => {
+      for (const url of cache.values()) {
+        try { URL.revokeObjectURL(url); } catch (_) { /* ignore */ }
+      }
+      cache.clear();
+    };
+  }, []);
 
   // ============================================================
   // 💬 SEND A TURN (shared by the voice path; broadcast + attribution unchanged)
@@ -617,6 +1126,12 @@ export default function ChatRoom() {
   // measured duration and raw transcript) so the send links the audio to this message.
   const transcribeAndSend = useCallback(async (blob, durationMs) => {
     setSttBusy(true);
+    // Hard client-side timeout so a hung /stt request can NEVER strand the UI in
+    // "Transcribing your turn…". 40s comfortably covers a slow-but-real transcription
+    // (server bounds its own OpenAI call), while guaranteeing the finally always runs so
+    // the mic frees up. On abort we surface a retry prompt instead of a silent freeze.
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 40000);
     try {
       const form = new FormData();
       form.append("file", blob, "recording.webm");
@@ -624,7 +1139,7 @@ export default function ChatRoom() {
       // can't auto-detect into a stray language/script.
       const sttLang = joinLanguage === "roman_urdu" ? "ur" : joinLanguage === "en" ? "en" : "";
       if (sttLang) form.append("language", sttLang);
-      const res = await fetch(`${API_BASE}/stt`, { method: "POST", body: form });
+      const res = await fetch(`${API_BASE}/stt`, { method: "POST", body: form, signal: controller.signal });
       if (!res.ok) throw new Error(`STT ${res.status}`);
       const data = await res.json();
       // `text` is the server-normalized Roman Urdu (or English); `raw_text` is the
@@ -647,9 +1162,15 @@ export default function ChatRoom() {
         showLanguageWarningBanner("Couldn't catch that — hold the mic and try again.");
       }
     } catch (err) {
-      console.warn("STT failed:", err?.message || err);
-      showLanguageWarningBanner("Transcription failed — please hold the mic and try again.");
+      if (err?.name === "AbortError") {
+        console.warn("STT timed out after 40s");
+        showLanguageWarningBanner("Transcription is taking too long — please hold the mic and try again.");
+      } else {
+        console.warn("STT failed:", err?.message || err);
+        showLanguageWarningBanner("Transcription failed — please hold the mic and try again.");
+      }
     } finally {
+      clearTimeout(timeoutId);
       setSttBusy(false);
     }
   }, [sendMessageText, showLanguageWarningBanner, joinLanguage]);
@@ -764,33 +1285,29 @@ export default function ChatRoom() {
 
     setConnectionStatus("connecting");
 
-    // Connection events
-    socket.on("connect", () => {
+    // ── named handlers so teardown only removes THIS effect's listeners,
+    //    not the global ones registered in socket.js (heartbeat, upgrade log).
+    const onConnect = () => {
       setConnectionStatus("connected");
       socket.emit("join_room", { room_id: roomId, user_name: userName, language: joinLanguage });
-    });
+    };
+    const onDisconnect = () => setConnectionStatus("disconnected");
+    const onConnectError = () => setConnectionStatus("error");
 
-    socket.on("disconnect", () => {
-      setConnectionStatus("disconnected");
-    });
-
-    socket.on("connect_error", () => {
-      setConnectionStatus("error");
-    });
-
-    // Room events
-    socket.on("joined_room", () => {
+    const onJoinedRoom = () => {
       setReady(true);
       setConnectionStatus("connected");
-      setParticipants(prev => {
-        if (!prev.includes(userName)) {
-          return [...prev, userName];
-        }
-        return prev;
-      });
-    });
+      setParticipants(prev => prev.includes(userName) ? prev : [...prev, userName]);
+      // Best-effort: try to unlock audio now. If the user's "Join" click left a sticky
+      // activation on this SPA document, the silent-clip play() resolves and the intro can
+      // autoplay without waiting for a separate gesture. If there's no activation, this is
+      // a harmless no-op (play() rejects, audioUnlockedRef stays false) and the first
+      // mic/Play tap still unlocks. Never blocks and never changes queue logic.
+      console.log("[AUDIO] joined_room → attempting audio unlock");
+      unlockAudio();
+    };
 
-    socket.on("chat_history", (data) => {
+    const onChatHistory = (data) => {
       const list = data.chat_history || [];
       processedIdsRef.current = new Set();
       for (const m of list) {
@@ -798,27 +1315,24 @@ export default function ChatRoom() {
         processedIdsRef.current.add(mid);
       }
       setMessages(list);
-      if (data.participants) {
-        setParticipants(data.participants);
-      } else {
-        setParticipants([userName]);
-      }
-    });
+      setParticipants(data.participants || [userName]);
+    };
 
-    socket.on("receive_message", (data) => {
-      console.log("📨 RECEIVED MESSAGE:", data);
-
-      // 🔊 Voice: speak ALL live Moderator messages (incl. the task intro) when the
-      // toggle is ON. toSpeechText strips HTML/markdown, so the intro card is read as
-      // plain text in the room's language.
-      if (voiceOnRef.current && data && data.sender === "Moderator") {
-        const sid =
-          data.id != null
-            ? String(data.id)
-            : `${data.sender}|${data.message}|${data.timestamp || ""}`;
-        if (!spokenIdsRef.current.has(sid)) {
+    const onReceiveMessage = (data) => {
+      // Auto-speak every live Moderator turn when voice is on. toSpeechText strips
+      // HTML/markdown so the task-intro card is read as clean plain text. The sid here
+      // is the canonical msgKey so the voice-note status UI lines up with the queue.
+      if (data && data.sender === "Moderator") {
+        const sid = msgKey(data);
+        console.log(`[VOICE] moderator msg received sid=${sid} voiceOn=${voiceOnRef.current} alreadySpoken=${spokenIdsRef.current.has(sid)} audioUnlocked=${audioUnlockedRef.current}`);
+        if (voiceOnRef.current && !spokenIdsRef.current.has(sid)) {
           spokenIdsRef.current.add(sid);
-          enqueueModeratorSpeech(data.message);
+          // The server may send a separate `speak_text` (e.g. the Roman-Urdu task intro)
+          // when what should be SPOKEN differs from the displayed message (the English task
+          // card). Fall back to the message text for every normal moderator turn.
+          enqueueModeratorSpeech(sid, data.speak_text || data.message);
+        } else {
+          console.log(`[VOICE] NOT speaking sid=${sid} (muted or duplicate)`);
         }
       }
 
@@ -828,6 +1342,7 @@ export default function ChatRoom() {
             ? String(data.id)
             : `${data.sender}|${data.message}|${data.timestamp || ""}`;
 
+        // Replace an optimistic bubble with the confirmed server message
         const optIdx = prev.findIndex(
           (msg) =>
             msg._optimistic &&
@@ -838,14 +1353,12 @@ export default function ChatRoom() {
           if (processedIdsRef.current.has(mid)) return prev;
           processedIdsRef.current.add(mid);
           const next = [...prev];
-          next[optIdx] = {
-            ...data,
-            timestamp: data.timestamp || next[optIdx].timestamp,
-          };
+          next[optIdx] = { ...data, timestamp: data.timestamp || next[optIdx].timestamp };
           return next;
         }
 
         if (processedIdsRef.current.has(mid)) {
+          // A flagged update may arrive for a message we already have — patch it in-place
           if (data.flagged) {
             const idx = prev.findIndex(
               (msg) =>
@@ -863,72 +1376,72 @@ export default function ChatRoom() {
         }
 
         processedIdsRef.current.add(mid);
+        // Bound the seen-set size to avoid unbounded memory growth over a long session
         if (processedIdsRef.current.size > 800) {
           processedIdsRef.current = new Set(
             Array.from(processedIdsRef.current).slice(-400)
           );
         }
 
-        const newMessage = {
-          ...data,
-          timestamp: data.timestamp || new Date().toISOString(),
-        };
-        return [...prev, newMessage];
+        return [...prev, { ...data, timestamp: data.timestamp || new Date().toISOString() }];
       });
-    });
+    };
 
-    const onLanguageWarningPayload = (data) => {
+    const onLanguageWarning = (data) => {
       if (data?.type === "language_warning" && data.message) {
         showLanguageWarningBanner(data.message);
       }
     };
-    socket.on("language_warning", onLanguageWarningPayload);
-    socket.on("warning_message", onLanguageWarningPayload);
 
-    socket.on("participants_update", (data) => {
-      setParticipants(data.participants || []);
-    });
+    const onParticipantsUpdate = (data) => setParticipants(data.participants || []);
 
-    // ============================================================
-    // 📊 RESEARCH STUDY SOCKET EVENTS
-    // ============================================================
-    socket.on("ranking_submitted", (data) => {
+    const onRankingSubmitted = (data) => {
       if (data.success) {
         setRankingSubmitted(true);
         const successId = `local-ranking-ok-${Date.now()}`;
         processedIdsRef.current.add(successId);
-        const successMsg = {
-          id: successId,
-          sender: "System",
-          message: "✅ Final ranking recorded (from your discussion or end of session).",
-          timestamp: new Date().toISOString(),
-        };
-        setMessages((prev) => [...prev, successMsg]);
+        setMessages((prev) => [
+          ...prev,
+          {
+            id: successId,
+            sender: "System",
+            message: "✅ Final ranking recorded (from your discussion or end of session).",
+            timestamp: new Date().toISOString(),
+          },
+        ]);
       } else {
         alert("❌ Failed to submit ranking: " + data.message);
       }
-    });
+    };
 
-    // Session ended handler
-    socket.on("session_ended", (data) => {
+    const onSessionEnded = (data) => {
       console.log("📨 Session ended with data:", data);
       const intended = data?.username;
-      if (intended && intended !== userName) {
-        return;
-      }
-      const feedback = data?.feedback || "Session ended. Thank you for participating!";
+      if (intended && intended !== userName) return;
       navigate("/feedback", {
         state: {
-          feedback,
+          feedback: data?.feedback || "Session ended. Thank you for participating!",
           room_id: data?.room_id,
           studentName: userName,
           targetUsername: intended || userName,
         },
       });
       setIsLoadingFeedback(false);
-    });
+    };
 
-    // If already connected, join room immediately
+    socket.on("connect",            onConnect);
+    socket.on("disconnect",         onDisconnect);
+    socket.on("connect_error",      onConnectError);
+    socket.on("joined_room",        onJoinedRoom);
+    socket.on("chat_history",       onChatHistory);
+    socket.on("receive_message",    onReceiveMessage);
+    socket.on("language_warning",   onLanguageWarning);
+    socket.on("warning_message",    onLanguageWarning);
+    socket.on("participants_update",onParticipantsUpdate);
+    socket.on("ranking_submitted",  onRankingSubmitted);
+    socket.on("session_ended",      onSessionEnded);
+
+    // Join immediately if already connected; otherwise wait for the connect event.
     if (socket.connected) {
       socket.emit("join_room", { room_id: roomId, user_name: userName, language: joinLanguage });
     } else {
@@ -940,19 +1453,20 @@ export default function ChatRoom() {
         window.clearTimeout(languageWarningTimerRef.current);
         languageWarningTimerRef.current = null;
       }
-      socket.off("connect");
-      socket.off("disconnect");
-      socket.off("connect_error");
-      socket.off("joined_room");
-      socket.off("chat_history");
-      socket.off("receive_message");
-      socket.off("participants_update");
-      socket.off("ranking_submitted");
-      socket.off("session_ended");
-      socket.off("language_warning", onLanguageWarningPayload);
-      socket.off("warning_message", onLanguageWarningPayload);
+      // Remove only THIS effect's handlers — the global ones in socket.js are preserved.
+      socket.off("connect",            onConnect);
+      socket.off("disconnect",         onDisconnect);
+      socket.off("connect_error",      onConnectError);
+      socket.off("joined_room",        onJoinedRoom);
+      socket.off("chat_history",       onChatHistory);
+      socket.off("receive_message",    onReceiveMessage);
+      socket.off("language_warning",   onLanguageWarning);
+      socket.off("warning_message",    onLanguageWarning);
+      socket.off("participants_update",onParticipantsUpdate);
+      socket.off("ranking_submitted",  onRankingSubmitted);
+      socket.off("session_ended",      onSessionEnded);
     };
-  }, [roomId, userName, navigate, showLanguageWarningBanner, enqueueModeratorSpeech]);
+  }, [roomId, userName, navigate, showLanguageWarningBanner, enqueueModeratorSpeech, unlockAudio]);
 
   // Auto-scroll to bottom
   useEffect(() => {
@@ -1069,36 +1583,50 @@ export default function ChatRoom() {
               <span>Items Panel</span>
             </button>
 
-            <button
-              onClick={() => {
-                unlockAudio(); // gesture: enable audio output
-                setVoiceOn((prev) => {
-                  const next = !prev;
-                  if (!next) stopAndClearVoice(); // turning off: stop now + clear queue
-                  return next;
-                });
-              }}
-              className={`px-3 py-1.5 rounded-xl font-bold text-xs border transition-all flex items-center gap-1.5 ${
-                voiceOn
-                  ? 'bg-indigo-50 text-indigo-700 border-indigo-200'
-                  : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50'
-              }`}
-              title={voiceOn ? "Voice on — moderator read aloud" : "Voice off"}
-              aria-pressed={voiceOn}
+            {/* 🔊 Global Moderator Voice toggle — segmented Voice / Muted (voice-first). */}
+            <div
+              className="flex items-center rounded-xl border border-slate-200 bg-white overflow-hidden text-xs font-bold"
+              role="group"
+              aria-label="Moderator voice"
             >
-              {voiceOn ? <MdVolumeUp size={16} /> : <MdVolumeOff size={16} />}
-              <span>Voice {voiceOn ? 'On' : 'Off'}</span>
-            </button>
+              <button
+                onClick={() => {
+                  unlockAudio();          // gesture: enable audio output
+                  setVoiceOn(true);
+                }}
+                aria-pressed={voiceOn}
+                title="Moderator speaks automatically"
+                className={`px-3 py-1.5 flex items-center gap-1.5 transition-all ${
+                  voiceOn ? 'bg-amber-500 text-white' : 'text-slate-500 hover:bg-slate-50'
+                }`}
+              >
+                <MdVolumeUp size={15} />
+                <span>Voice</span>
+              </button>
+              <button
+                onClick={() => {
+                  setVoiceOn(false);
+                  stopAndClearVoice();    // muting stops playback + clears the queue
+                }}
+                aria-pressed={!voiceOn}
+                title="Mute the moderator (notes stay tappable)"
+                className={`px-3 py-1.5 flex items-center gap-1.5 transition-all border-l border-slate-200 ${
+                  !voiceOn ? 'bg-slate-700 text-white' : 'text-slate-500 hover:bg-slate-50'
+                }`}
+              >
+                <MdVolumeOff size={15} />
+                <span>Muted</span>
+              </button>
+            </div>
 
-            {/* Stop the moderator's current speech (without turning voice off). Only
-                shown while it's actually speaking. */}
+            {/* ⏭ Skip — stays available while the moderator is speaking. */}
             {isSpeaking && (
               <button
-                onClick={stopAndClearVoice}
-                className="px-3 py-1.5 rounded-xl font-bold text-xs border bg-rose-50 text-rose-700 border-rose-200 hover:bg-rose-100 transition-all flex items-center gap-1.5"
-                title="Stop the moderator's current speech"
+                onClick={skipCurrent}
+                className="px-3 py-1.5 rounded-xl font-bold text-xs border bg-amber-50 text-amber-700 border-amber-200 hover:bg-amber-100 transition-all flex items-center gap-1.5"
+                title="Skip current clip and play next queued message"
               >
-                <span>⏹ Stop</span>
+                <span>⏭ Skip</span>
               </button>
             )}
 
@@ -1199,21 +1727,16 @@ export default function ChatRoom() {
               messages.map((msg, index) => {
                 const isModerator = msg.sender === "Moderator";
                 const isSystem = msg.sender === "System";
-                // 🎙️ Moderator is VOICE-ONLY: hide its conversational text from the chat
-                // (participants only HEAR it). The task-intro CARD is the one exception —
-                // it's the 12-item reference participants must read. TTS is unaffected
-                // (it's triggered in the socket handler, not here).
-                const isTaskCard =
-                  msg.message_type === "task" ||
-                  msg.content_format === "html" ||
-                  (typeof msg.message === "string" && msg.message.includes('class="task-intro"'));
-                if (isModerator && !isTaskCard) return null;
+                // Voice-first: a conversational moderator turn renders as a VOICE NOTE; the
+                // task-intro card and short system/time notices keep their text card
+                // (classifyModerator decides). TTS is still triggered in the socket handler.
+                const isModeratorVoiceNote = isModerator && classifyModerator(msg) === "voice";
                 const isFlagged = Boolean(msg.flagged);
                 const isCurrentUser = msg.sender === userName;
                 const userColor = !isModerator && !isSystem ? getUserColor(msg.sender, userName) : null;
-                const timestamp = msg.timestamp ? new Date(msg.timestamp).toLocaleTimeString([], { 
-                  hour: '2-digit', 
-                  minute: '2-digit' 
+                const timestamp = msg.timestamp ? new Date(msg.timestamp).toLocaleTimeString([], {
+                  hour: '2-digit',
+                  minute: '2-digit'
                 }) : '';
 
                 return (
@@ -1224,7 +1747,9 @@ export default function ChatRoom() {
                     {/* Avatars */}
                     <div className="flex-shrink-0">
                       {isModerator ? (
-                        <div className="w-10 h-10 rounded-xl bg-gradient-to-tr from-amber-400 to-orange-500 flex items-center justify-center text-white shadow-md shadow-orange-100 animate-pulse-glow">
+                        <div className={`w-10 h-10 rounded-xl bg-gradient-to-tr from-amber-400 to-orange-500 flex items-center justify-center text-white shadow-md shadow-orange-100 ${
+                          isModeratorVoiceNote && playingKey === msgKey(msg) && !voicePaused ? 'animate-pulse-glow ring-2 ring-amber-300' : ''
+                        }`}>
                           <span className="text-lg">🤖</span>
                         </div>
                       ) : isSystem ? (
@@ -1237,20 +1762,42 @@ export default function ChatRoom() {
                         </div>
                       )}
                     </div>
-                    
-                    {/* Message detail container */}
+
+                    {isModeratorVoiceNote ? (
+                      /* 🎙️ Voice-first moderator turn — rendered as a voice note */
+                      <ModeratorVoiceNote
+                        msg={msg}
+                        status={noteStatuses[msgKey(msg)] || "idle"}
+                        paused={playingKey === msgKey(msg) && voicePaused}
+                        progress={playingKey === msgKey(msg) ? playback.progress : 0}
+                        elapsed={playingKey === msgKey(msg) ? playback.elapsed : 0}
+                        duration={
+                          playingKey === msgKey(msg)
+                            ? playback.duration || noteDurations[msgKey(msg)] || 0
+                            : noteDurations[msgKey(msg)] || 0
+                        }
+                        muted={!voiceOn}
+                        timestamp={timestamp}
+                        transcript={toSpeechText(msg.message)}
+                        expanded={!!expandedTranscripts[msgKey(msg)]}
+                        onToggleTranscript={() => toggleTranscript(msgKey(msg))}
+                        onPlayPause={() => handleVoiceNoteTap(msgKey(msg), msg.message)}
+                        onSkip={skipCurrent}
+                      />
+                    ) : (
+                    /* Message detail container */
                     <div className={`max-w-[75%] md:max-w-[65%] ${isCurrentUser ? 'text-right' : 'text-left'}`}>
                       <div className="flex items-center gap-2 mb-1.5 px-1">
                         <span className={`font-bold text-xs ${
-                          isModerator ? 'text-amber-705' : 
+                          isModerator ? 'text-amber-705' :
                           isSystem ? 'text-slate-500' :
                           userColor?.text || 'text-slate-700'
                         }`}>
                           {isCurrentUser ? 'You' : msg.sender}
                         </span>
-                        
+
                         <span className="text-[10px] text-slate-400 font-medium">{timestamp}</span>
-                        
+
                         {isFlagged && !isModerator && !isSystem && (
                           <span className="badge badge-warning text-[9px] py-0 px-1.5 flex items-center gap-0.5">
                             <MdWarning size={10} />
@@ -1258,7 +1805,7 @@ export default function ChatRoom() {
                           </span>
                         )}
                       </div>
-                      
+
                       {/* Message Body Card */}
                       <div
                         className={`rounded-2xl px-4 py-3 text-xs leading-relaxed shadow-sm border ${
@@ -1284,6 +1831,7 @@ export default function ChatRoom() {
                         <ChatMessageBody msg={msg} isCurrentUser={isCurrentUser} onPlayVoice={playVoiceMessage} onSpeak={playModeratorMessage} />
                       </div>
                     </div>
+                    )}
                   </div>
                 );
               })

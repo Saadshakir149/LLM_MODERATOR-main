@@ -1047,7 +1047,69 @@ CRITICAL RULES:
 2. Example: write "aap ka kya khayal hai?" NOT "آپ کا کیا خیال ہے؟".
 3. Never mix languages within a single reply.
 4. Never use Urdu Unicode characters under any circumstances.
+
+PAKISTANI ROMAN URDU (when the target language is Roman Urdu):
+- Speak natural, conversational PAKISTANI Roman Urdu — the way a Pakistani moderator talks
+  in a live discussion. NOT Hindi, and NOT formal/Sanskritized Hindustani.
+- Use Urdu/Pakistani everyday words, NOT Hindi-Sanskrit ones. For example:
+  say "rai" (NOT "vichar"), "guftagu"/"baat cheet" (NOT "samvaad"/"charcha"),
+  "faisla" (NOT "nirnay"), "sawaal" (NOT "prashna"), "jawab" (NOT "uttar"),
+  "shukriya" (NOT "dhanyavaad"), "masla" (NOT "samasya"), "istemaal" (NOT "upyog"),
+  "guzarish"/"meharbani" (NOT "anurodh"/"kripya"), "ahem" (NOT "mahatvapurna").
+- Casual code-switching to common English words (discussion, ranking, point, item) is
+  natural and fine. Tone: warm, direct, brief.
+- Examples: "Acha ji, ab hum discussion shuru karte hain." /
+  "Apni rai share karein." / "Sab log apni baat mukhtasir rakhein."
 """
+
+# ------------------------------------------------------------
+# Pakistani Roman Urdu vocabulary safety-net. The prompt above is the PRIMARY fix; this is
+# a last-resort post-filter that swaps the few Hindi-Sanskrit words an LLM most commonly
+# slips in for their everyday Pakistani-Urdu equivalents. Word-boundary + case-insensitive
+# so it never mangles substrings, and it is ONLY applied to roman_urdu/mixed speech (English
+# turns are untouched). Conservative by design — better to miss one than to corrupt text.
+# ------------------------------------------------------------
+_HINDI_TO_PK_URDU = {
+    "vichar": "rai", "vichaar": "rai",
+    "prastut": "share", "charcha": "baat cheet", "samvaad": "guftagu",
+    "kripya": "meharbani", "anurodh": "guzarish",
+    "karya": "kaam", "prakriya": "tareeqa", "sampark": "raabta",
+    "upyog": "istemaal", "nirnay": "faisla", "nirnaya": "faisla",
+    "sahayog": "madad", "prashna": "sawaal", "prashn": "sawaal",
+    "uttar": "jawab", "dhanyavaad": "shukriya", "dhanyawad": "shukriya",
+    "samasya": "masla", "mahatvapurna": "ahem", "mahatvapoorn": "ahem",
+}
+_HINDI_TO_PK_URDU_RE = [
+    (re.compile(rf"\b{re.escape(_k)}\b", re.IGNORECASE), _v)
+    for _k, _v in _HINDI_TO_PK_URDU.items()
+]
+
+
+def enforce_pakistani_roman_urdu(text: str) -> str:
+    """Swap common Hindi-Sanskrit words for Pakistani Roman-Urdu ones (word-boundary,
+    case-insensitive). Safe no-op for empty/None. Apply only to Roman-Urdu speech."""
+    if not text:
+        return text or ""
+    out = text
+    for _rx, _repl in _HINDI_TO_PK_URDU_RE:
+        out = _rx.sub(_repl, out)
+    return out
+
+
+def roman_urdu_spoken_intro(n_items: int = 12) -> str:
+    """What the moderator SAYS to open a Roman-Urdu room — a natural, scenario-agnostic
+    Pakistani Roman-Urdu task intro. The visual task card (English) carries the scenario
+    story + the canonical English item names; this is only the spoken greeting, so it stays
+    generic (no per-scenario translation, no item-name translation)."""
+    n = n_items if isinstance(n_items, int) and n_items > 0 else 12
+    return (
+        "Assalam o Alaikum, sab ko khush aamdeed! Aaj hum ek survival task karenge. "
+        f"Aap ki team ke paas {n} cheezein hain jinhe aap ne sab se zaroori se kam zaroori "
+        "tak rank karna hai. Aapas mein guftagu karke ek hi final group ranking par mutfiq "
+        "hon, aur apni wajah mukhtasar batane ke liye tayyar rahein. Aap ke paas pandrah "
+        "minute hain. Chaliye, baat cheet shuru karte hain!"
+    )
+
 
 # Concise behavioural guideline so interventions stay sharp (not repetitive / off-task).
 _MODERATION_QUALITY_POLICY = """
@@ -1177,6 +1239,48 @@ def normalize_roman_urdu(text: str) -> str:
         return text
 
 
+def roman_to_urdu_script(text: str) -> str:
+    """Transliterate Roman Urdu (Latin) → Urdu SCRIPT (Arabic) for NATIVE TTS pronunciation.
+
+    Used ONLY for the spoken audio sent to Uplift — chat text and the messages table stay
+    Roman Urdu (this is the reverse of normalize_roman_urdu, applied downstream of display
+    and persistence). NEVER raises and NEVER blocks TTS: on any failure / empty output /
+    output with no Urdu script, returns the ORIGINAL Roman text so Uplift still speaks
+    (accented) rather than going silent. If the input already contains Urdu script, it is
+    returned unchanged.
+    """
+    raw = (text or "").strip()
+    if not raw:
+        return text or ""
+    if _URDU_SCRIPT_RE.search(raw):  # already Urdu script → nothing to transliterate
+        return raw
+    try:
+        system = (
+            "You transliterate ROMAN URDU (written in the Latin alphabet) into proper URDU "
+            "SCRIPT (Arabic/Nastaliq). Output ONLY the Urdu-script text — no Latin letters, "
+            "no quotes, no explanation. Preserve the meaning and word order EXACTLY; do not "
+            "translate, add, or remove anything. Write natural, standard Pakistani Urdu. "
+            "Render common English words in their usual Urdu spelling; keep numbers as digits."
+        )
+        out = call_llm(
+            messages=[{"role": "user", "content": raw}],
+            temperature=0.0,
+            max_tokens=min(600, len(raw) + 200),
+            system_prompt=system,
+        )
+        out = (out or "").strip()
+        if not out or not _URDU_SCRIPT_RE.search(out):
+            logger.warning("Roman→Urdu transliteration produced no Urdu script; keeping Roman for TTS")
+            return text
+        if len(out) > 6 * len(raw) + 80:  # model rambled / added commentary
+            logger.warning("Roman→Urdu transliteration implausibly long; keeping Roman for TTS")
+            return text
+        return out
+    except Exception as e:
+        logger.warning(f"Roman→Urdu transliteration failed (keeping Roman for TTS): {e}")
+        return text
+
+
 def _extract_json_object(raw: str) -> Optional[Dict[str, Any]]:
     """Best-effort parse of a JSON object from an LLM reply (handles ``` fences)."""
     if not raw:
@@ -1281,9 +1385,15 @@ def generate_active_moderator_response(
     time_elapsed: int,
     last_intervention_time: int,
     dominance_detected: Optional[str] = None,
-    silent_user: Optional[str] = None
+    silent_user: Optional[str] = None,
+    language: Optional[str] = None,
 ) -> str:
-    """Generate ACTIVE moderator response based on research rules"""
+    """Generate ACTIVE moderator response based on research rules.
+
+    `language` (en | roman_urdu | mixed) PINS the reply language to the room's language so
+    the moderator never drifts into a participant's code-switched language. When None, the
+    system prompt's policy falls back to matching the participants (legacy behavior).
+    """
     try:
         logger.info("="*60)
         logger.info("🎯 GENERATE_ACTIVE_MODERATOR_RESPONSE CALLED")
@@ -1535,9 +1645,18 @@ ONLY use these participant names: {participant_list_str}"""
         }
         call_temp = temp_map.get(intervention_type, 0.72)
 
+        # Pin the reply language to the ROOM's language so the moderator can't drift into a
+        # participant's code-switched language (e.g. Roman Urdu in an English room). Same
+        # directive the passive moderator uses; the system prompt's LANGUAGE policy obeys it.
+        lang_directive = ""
+        if language:
+            lang_name = "Roman Urdu (Latin script)" if language in ("roman_urdu", "mixed") else "English"
+            lang_directive = f"LANGUAGE: Respond ONLY in {lang_name}; do not switch languages.\n\n"
+            logger.info(f"   🗣️ Active reply language pinned: {lang_name}")
+
         response = call_llm(
             messages=[
-                {"role": "user", "content": prompt}
+                {"role": "user", "content": lang_directive + prompt}
             ],
             system_prompt=system_prompt,
             temperature=call_temp,

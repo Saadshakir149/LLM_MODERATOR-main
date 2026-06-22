@@ -35,23 +35,31 @@ const FRONTEND_URL = window.location.origin;
 
 // Admin token (prefilled from env if provided; can also be typed into the header field).
 // Sent as the X-Admin-Token header on every /admin/* request.
-let _adminToken = process.env.REACT_APP_ADMIN_TOKEN || '';
+const ADMIN_FETCH_TIMEOUT_MS = 20000;
 
-const adminFetch = (url, options = {}) =>
-  fetch(url, {
+const adminFetch = (url, token, options = {}, timeoutMs = ADMIN_FETCH_TIMEOUT_MS) => {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  return fetch(url, {
     ...options,
-    headers: { ...(options.headers || {}), 'X-Admin-Token': _adminToken },
-  });
+    signal: controller.signal,
+    headers: { ...(options.headers || {}), 'X-Admin-Token': token },
+  }).finally(() => clearTimeout(timer));
+};
 
 export default function AdminDashboard() {
   const navigate = useNavigate(); // ✅ ADD THIS LINE
   const [activeTab, setActiveTab] = useState('dashboard');
-  const [adminToken, setAdminTokenState] = useState(_adminToken);
+  const [adminToken, setAdminTokenState] = useState(
+    () => process.env.REACT_APP_ADMIN_TOKEN || ''
+  );
   const [rooms, setRooms] = useState([]);
   const [stats, setStats] = useState(null);
   const [settings, setSettings] = useState([]);
   const [selectedRoom, setSelectedRoom] = useState(null);
   const [loading, setLoading] = useState(false);
+  const [connectionStatus, setConnectionStatus] = useState('idle'); // idle | loading | ok | error
+  const [authError, setAuthError] = useState(null); // visible reason loads fail (e.g. 401)
   const [adminLogs, setAdminLogs] = useState([]);
   const [showCreateRoomModal, setShowCreateRoomModal] = useState(false);
   const [newRoomData, setNewRoomData] = useState({
@@ -84,30 +92,61 @@ export default function AdminDashboard() {
     };
   }, []);
 
-  const loadDashboardData = async () => {
+  const formatFetchError = (err) => {
+    if (err?.name === 'AbortError') {
+      return (
+        `Request timed out after ${ADMIN_FETCH_TIMEOUT_MS / 1000}s. ` +
+        `The backend at ${API_URL} may be asleep (Render free tier), down, or stuck on a database call. ` +
+        `Try running the server locally (python app.py) or wait for Render to wake up, then click Retry.`
+      );
+    }
+    return `Could not reach the server: ${err.message}. Is the backend running on ${API_URL}?`;
+  };
+
+  const loadDashboardData = async (token = adminToken) => {
     try {
       setLoading(true);
+      setConnectionStatus('loading');
       const [roomsRes, statsRes] = await Promise.all([
-        adminFetch(`${API_URL}/admin/rooms`),
-        adminFetch(`${API_URL}/admin/stats`)
+        adminFetch(`${API_URL}/admin/rooms`, token),
+        adminFetch(`${API_URL}/admin/stats`, token),
       ]);
-      
+
+      // Surface auth/HTTP failures instead of silently treating a 401 body as data.
+      if (roomsRes.status === 401 || statsRes.status === 401) {
+        setAuthError(
+          'Unauthorized (401): admin token missing or wrong. ' +
+          'Enter the same value as server ADMIN_TOKEN in the header field (or set REACT_APP_ADMIN_TOKEN and restart the frontend).'
+        );
+        setConnectionStatus('error');
+        return;
+      }
+      if (!roomsRes.ok || !statsRes.ok) {
+        setAuthError(`Server error loading dashboard (rooms ${roomsRes.status}, stats ${statsRes.status}).`);
+        setConnectionStatus('error');
+        return;
+      }
+
       const roomsData = await roomsRes.json();
       const statsData = await statsRes.json();
-      
+
       setRooms(roomsData.rooms || []);
       setStats(statsData);
+      setAuthError(null);
+      setConnectionStatus('ok');
     } catch (err) {
       console.error('Failed to load data:', err);
-      alert(`Failed to load data: ${err.message}`);
+      setAuthError(formatFetchError(err));
+      setConnectionStatus('error');
     } finally {
-      setLoading(false);
+      setLoading(false); // ALWAYS reset — never leave the panel stuck "Refreshing..."
     }
   };
 
-  const loadSettings = async () => {
+  const loadSettings = async (token = adminToken) => {
     try {
-      const res = await adminFetch(`${API_URL}/admin/settings`);
+      const res = await adminFetch(`${API_URL}/admin/settings`, token);
+      if (res.status === 401) return;
       const data = await res.json();
       setSettings(data.settings || []);
     } catch (err) {
@@ -115,9 +154,10 @@ export default function AdminDashboard() {
     }
   };
 
-  const loadAdminLogs = async () => {
+  const loadAdminLogs = async (token = adminToken) => {
     try {
-      const res = await adminFetch(`${API_URL}/admin/logs`);
+      const res = await adminFetch(`${API_URL}/admin/logs`, token);
+      if (res.status === 401) return;
       const data = await res.json();
       setAdminLogs(data.logs || []);
     } catch (err) {
@@ -125,10 +165,18 @@ export default function AdminDashboard() {
     }
   };
 
+  const reloadAll = (token = adminToken) => {
+    loadDashboardData(token);
+    loadSettings(token);
+    loadAdminLogs(token);
+  };
+
+  const fetchAdmin = (url, options) => adminFetch(url, adminToken, options);
+
   const updateSetting = async (key, value) => {
     try {
       setLoading(true);
-      await adminFetch(`${API_URL}/admin/settings/${key}`, {
+      await fetchAdmin(`${API_URL}/admin/settings/${key}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ value, updated_by: 'admin' })
@@ -149,7 +197,7 @@ export default function AdminDashboard() {
     }
 
     try {
-      const res = await adminFetch(`${API_URL}/admin/rooms/${roomId}`, {
+      const res = await fetchAdmin(`${API_URL}/admin/rooms/${roomId}`, {
         method: 'DELETE'
       });
 
@@ -172,7 +220,7 @@ export default function AdminDashboard() {
   const viewRoomDetails = async (roomId) => {
     try {
       setLoading(true);
-      const res = await adminFetch(`${API_URL}/admin/rooms/${roomId}`);
+      const res = await fetchAdmin(`${API_URL}/admin/rooms/${roomId}`);
       const data = await res.json();
       setSelectedRoom(data);
       setActiveTab('room-detail');
@@ -187,7 +235,7 @@ export default function AdminDashboard() {
   const createAdminRoom = async () => {
     try {
       setLoading(true);
-      const res = await adminFetch(`${API_URL}/admin/rooms`, {
+      const res = await fetchAdmin(`${API_URL}/admin/rooms`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -222,7 +270,7 @@ export default function AdminDashboard() {
 
   const exportRoomChat = async (roomId, format) => {
     try {
-      const res = await adminFetch(`${API_URL}/admin/rooms/${roomId}/export/chat?format=${format}`);
+      const res = await fetchAdmin(`${API_URL}/admin/rooms/${roomId}/export/chat?format=${format}`);
       
       if (!res.ok) {
         const error = await res.json();
@@ -263,7 +311,7 @@ export default function AdminDashboard() {
   // Admin-gated server endpoint; the private audio bucket is never exposed.
   const downloadRoomRecording = async (roomId) => {
     try {
-      const res = await adminFetch(`${API_URL}/api/room/${roomId}/recording?format=mp3`);
+      const res = await fetchAdmin(`${API_URL}/api/room/${roomId}/recording?format=mp3`);
       if (!res.ok) {
         let msg = 'Recording export failed';
         try { msg = (await res.json()).error || msg; } catch (_) { /* non-JSON */ }
@@ -288,7 +336,7 @@ export default function AdminDashboard() {
   // Export authoritative research metrics (Priority 6). level=participant|summary.
   const downloadRoomMetrics = async (roomId, level = 'participant') => {
     try {
-      const res = await adminFetch(`${API_URL}/admin/research/metrics/${roomId}/export?format=csv&level=${level}`);
+      const res = await fetchAdmin(`${API_URL}/admin/research/metrics/${roomId}/export?format=csv&level=${level}`);
       if (!res.ok) {
         let msg = 'Metrics export failed';
         try { msg = (await res.json()).error || msg; } catch (_) { /* non-JSON */ }
@@ -316,7 +364,7 @@ export default function AdminDashboard() {
     }
 
     try {
-      const res = await adminFetch(`${API_URL}/admin/rooms/${roomId}/end`, {
+      const res = await fetchAdmin(`${API_URL}/admin/rooms/${roomId}/end`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -344,7 +392,7 @@ export default function AdminDashboard() {
 
   const updateRoomStatus = async (roomId, status) => {
     try {
-      const res = await adminFetch(`${API_URL}/admin/rooms/${roomId}/status`, {
+      const res = await fetchAdmin(`${API_URL}/admin/rooms/${roomId}/status`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -389,25 +437,49 @@ export default function AdminDashboard() {
               <input
                 type="password"
                 value={adminToken}
-                onChange={(e) => { _adminToken = e.target.value; setAdminTokenState(e.target.value); }}
-                onBlur={() => { loadDashboardData(); loadSettings(); loadAdminLogs(); }}
+                onChange={(e) => setAdminTokenState(e.target.value)}
+                onBlur={() => reloadAll(adminToken)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') reloadAll(adminToken);
+                }}
                 placeholder="Admin token"
-                title="X-Admin-Token sent with every admin request"
+                title="X-Admin-Token sent with every admin request (must match server ADMIN_TOKEN)"
                 className="hidden md:block w-40 px-3 py-2 text-xs font-mono border border-slate-200 rounded-lg bg-white focus:outline-none focus:ring-2 focus:ring-indigo-200"
               />
               <div className="hidden md:flex items-center gap-5">
                 <div className="text-right">
-                  <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">System Cluster Status</p>
+                  <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Backend</p>
                   <div className="flex items-center gap-1.5 mt-0.5">
-                    <span className="pulse-green">
-                      <span className="pulse-green-ping"></span>
-                      <span className="pulse-green-dot"></span>
-                    </span>
-                    <span className="text-xs text-emerald-650 font-bold">All Engines Active</span>
+                    {connectionStatus === 'loading' && (
+                      <>
+                        <span className="inline-block w-2 h-2 rounded-full bg-amber-400 animate-pulse" />
+                        <span className="text-xs text-amber-700 font-bold">Connecting…</span>
+                      </>
+                    )}
+                    {connectionStatus === 'ok' && (
+                      <>
+                        <span className="pulse-green">
+                          <span className="pulse-green-ping"></span>
+                          <span className="pulse-green-dot"></span>
+                        </span>
+                        <span className="text-xs text-emerald-650 font-bold">Connected</span>
+                      </>
+                    )}
+                    {(connectionStatus === 'error' || connectionStatus === 'idle') && (
+                      <>
+                        <span className="inline-block w-2 h-2 rounded-full bg-rose-500" />
+                        <span className="text-xs text-rose-600 font-bold">
+                          {connectionStatus === 'idle' ? 'Not loaded' : 'Unreachable'}
+                        </span>
+                      </>
+                    )}
                   </div>
+                  <p className="text-[10px] text-slate-400 mt-0.5 truncate max-w-[180px]" title={API_URL}>
+                    {API_URL.replace(/^https?:\/\//, '')}
+                  </p>
                 </div>
                 <button 
-                  onClick={loadDashboardData}
+                  onClick={() => reloadAll()}
                   disabled={loading}
                   className="btn-primary py-2.5 px-4 flex items-center gap-2 shadow-sm text-xs font-bold"
                 >
@@ -419,6 +491,18 @@ export default function AdminDashboard() {
           </div>
         </div>
       </header>
+
+      {authError && (
+        <div className="bg-rose-50 border-b border-rose-200 px-6 py-3 text-sm text-rose-700 flex items-center justify-between">
+          <span>⚠️ {authError}</span>
+          <button
+            onClick={() => { setAuthError(null); reloadAll(); }}
+            className="ml-4 px-3 py-1 bg-rose-600 text-white rounded-lg text-xs font-bold hover:bg-rose-700"
+          >
+            Retry
+          </button>
+        </div>
+      )}
 
       <div className="flex">
         {/* Modern Sidebar */}
@@ -620,8 +704,9 @@ function DashboardView({ stats, rooms }) {
             onClick={() => {
               const exportAllData = async () => {
                 try {
-                  const res = await adminFetch(`${API_URL}/admin/rooms`);
-                  const data = await res.json();
+                  // Export the rooms already loaded into this view — no extra fetch (and no
+                  // token needed here, which is why fetchAdmin isn't in scope inside DashboardView).
+                  const data = { rooms, count: rooms.length, exported_at: new Date().toISOString() };
                   const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
                   const url = window.URL.createObjectURL(blob);
                   const a = document.createElement('a');

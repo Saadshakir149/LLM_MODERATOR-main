@@ -36,13 +36,15 @@ import json
 import csv
 import random
 import re
+import hashlib
 import traceback  # Add this line
 from functools import wraps
+from collections import OrderedDict
 from io import BytesIO, StringIO
 from typing import Dict, List, Any, Optional, Set
 from datetime import datetime, timezone
 
-from flask import Flask, request, send_file, jsonify, make_response
+from flask import Flask, request, send_file, jsonify, make_response, Response, stream_with_context
 from flask_socketio import SocketIO, join_room, emit
 from flask_cors import CORS
 from dotenv import load_dotenv
@@ -122,7 +124,10 @@ from prompts import (
     detect_language,
     detect_language_from_messages,
     normalize_roman_urdu,
+    roman_to_urdu_script,
     classify_and_normalize,
+    enforce_pakistani_roman_urdu,
+    roman_urdu_spoken_intro,
     LANG_EN,
     LANG_ROMAN_URDU,
     LANG_MIXED,
@@ -184,7 +189,14 @@ allowed_origins = list({FRONTEND_URL, "http://localhost:3000"})
 logger.info(f"🔒 CORS allowed origins: {allowed_origins}")
 
 app = Flask(__name__)
-CORS(app, resources={r"/*": {"origins": allowed_origins}})
+# Explicitly allow the custom X-Admin-Token header on preflight, or the browser blocks
+# the actual admin GET after the OPTIONS (symptom: only OPTIONS in the log, no GET).
+CORS(
+    app,
+    resources={r"/*": {"origins": allowed_origins}},
+    allow_headers=["Content-Type", "X-Admin-Token", "Authorization"],
+    methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+)
 
 socketio = SocketIO(
     app,
@@ -248,6 +260,62 @@ last_item_clarification_at: Dict[str, float] = {}
 # One 5-min and one 1-min warning per room across timer + active + passive threads
 room_time_warning_5min_claimed: Dict[str, bool] = {}
 room_time_warning_1min_claimed: Dict[str, bool] = {}
+# Per-room locks that serialise start_task_for_room calls so two concurrent
+# join_room background tasks can't both pass the status check and spawn
+# duplicate moderator threads. dict.setdefault is atomic under CPython's GIL.
+_room_task_locks: Dict[str, threading.Lock] = {}
+
+# In-memory "task already started" guard. Set under the per-room task lock the instant a
+# room passes the 3-participant gate, BEFORE any DB write. This is what prevents a double
+# task-start / double intro, so update_room_status('active') no longer has to sit on the
+# critical path ahead of the intro broadcast (a failed status write can't cause a re-start).
+_tasks_started: Set[str] = set()
+
+# Per-room wake events. The moderator loop waits on this with a timeout instead of a
+# blind sleep, so send_message can nudge it the INSTANT a student speaks — dropping
+# reactive-reply detection latency from up-to-the-poll-interval to ~0. The timeout still
+# fires for time-based interventions (silence / time warnings), so the moderation cadence
+# and every intervention condition are unchanged; only detection latency improves.
+room_moderator_wake: Dict[str, threading.Event] = {}
+
+
+def _get_wake_event(room_id: str) -> threading.Event:
+    """Return the room's wake event (created once; setdefault is GIL-atomic)."""
+    return room_moderator_wake.setdefault(room_id, threading.Event())
+
+
+def nudge_moderator(room_id: str) -> None:
+    """Wake the room's moderator loop now — a student just spoke. Best-effort."""
+    if not room_id:
+        return
+    try:
+        _get_wake_event(room_id).set()
+    except Exception:
+        pass
+
+
+# Per-room locks guarding the "who replies to this user turn" claim. The synchronous
+# @mention path (socket-handler thread) and the woken monitor loop (its own thread) can
+# both look at the same latest user message; without a claim they'd each generate a reply
+# → duplicate moderator voice. _claim_reply_to() lets exactly ONE of them win per message.
+_room_mod_claim_lock: Dict[str, threading.Lock] = {}
+
+
+def _claim_reply_to(room_id: str, msg_id: Any) -> bool:
+    """Atomically claim the moderator's reply to user message `msg_id` for this room.
+    Returns True for the first caller (which should generate the reply) and False for any
+    later caller racing on the same message (which must NOT also reply). Claim state is the
+    existing `last_at_mod_reply_for_msg_id` aux field, so it stays compatible with the
+    loop's own dedup checks."""
+    if not room_id or not msg_id:
+        return True  # nothing to dedup against → preserve prior behavior
+    lock = _room_mod_claim_lock.setdefault(room_id, threading.Lock())
+    aux = room_active_moderator_aux.setdefault(room_id, {})
+    with lock:
+        if str(aux.get("last_at_mod_reply_for_msg_id") or "") == str(msg_id):
+            return False
+        aux["last_at_mod_reply_for_msg_id"] = str(msg_id)
+        return True
 
 
 def claim_session_time_warning(room_id: str, kind: str) -> bool:
@@ -419,6 +487,36 @@ def _mentions_moderator(text: str) -> bool:
     return bool(text and _MODERATOR_MENTION_RE.search(text))
 
 
+def enforce_response_length(text: str, max_words: int = 55) -> str:
+    """Cap a moderator line to at most `max_words` words (a safety net; the prompts already
+    aim for ~25 words / 1-3 sentences). Returns the text unchanged when it's already within
+    budget — so it's a no-op for short canned lines. When it must trim, it prefers to end at
+    the last sentence boundary inside the budget to avoid a mid-sentence cut, falling back to
+    a clean word-boundary cut with an ellipsis. Markdown (**bold**) is preserved.
+
+    Defensive by design: any unexpected input is returned best-effort rather than raising,
+    because this runs inside the moderator loop where an exception would skip the rest of the
+    tick.
+    """
+    try:
+        if not text:
+            return text or ""
+        words = str(text).split()
+        if max_words is None or max_words <= 0 or len(words) <= max_words:
+            return str(text).strip()
+        clipped = " ".join(words[:max_words]).strip()
+        # Prefer ending on a complete sentence within the budget.
+        for end in (". ", "! ", "? "):
+            idx = clipped.rfind(end)
+            if idx >= len(clipped) * 0.6:  # only if it keeps most of the content
+                return clipped[: idx + 1].strip()
+        # Otherwise a clean word-boundary cut with an ellipsis.
+        return clipped.rstrip(",;:—- ") + "…"
+    except Exception:
+        # Never let a formatting helper break moderator generation.
+        return str(text).strip() if text else ""
+
+
 def chat_socket_payload(sender: str, message: str, **extra: Any) -> dict:
     """Stable chat event payload with id (dedup on client)."""
     payload: dict = {
@@ -564,8 +662,11 @@ try:
     openai_api_key = os.getenv("OPENAI_API_KEY")
     if openai_api_key:
         from openai import OpenAI
-        openai_client = OpenAI(api_key=openai_api_key)
-        logger.info("✅ OpenAI client initialized")
+        # Bound every call: the SDK default is a 600 s timeout × 2 retries, so a single
+        # stalled STT/TTS/LLM request would pin a server thread for ~30 min and starve
+        # the (concurrency-limited) dev server. 30 s / 1 retry caps worst-case at ~60 s.
+        openai_client = OpenAI(api_key=openai_api_key, timeout=30.0, max_retries=1)
+        logger.info("✅ OpenAI client initialized (timeout=30s, retries=1)")
     else:
         logger.warning("⚠️ OPENAI_API_KEY not found")
 except ImportError:
@@ -578,8 +679,10 @@ try:
     from groq import Groq
     groq_api_key = os.getenv("GROQ_API_KEY")
     if groq_api_key:
-        groq_client = Groq(api_key=groq_api_key)
-        logger.info("✅ Groq client initialized as fallback")
+        # Same rationale as the OpenAI client: bound hangs so one slow LLM call can't
+        # hold a worker thread and stall transcription/voice for everyone.
+        groq_client = Groq(api_key=groq_api_key, timeout=20.0, max_retries=1)
+        logger.info("✅ Groq client initialized as fallback (timeout=20s, retries=1)")
     else:
         logger.warning("⚠️ GROQ_API_KEY not found")
 except ImportError:
@@ -627,6 +730,62 @@ def synthesize_for_language(text: str, language: Optional[str]):
     never breaks just because Uplift isn't fully configured. Returns MP3 bytes.
     """
     prefer_uplift = language in ("roman_urdu", "urdu", "mixed")
+    # FORCE_UPLIFT_FOR_URDU=true → never fall back to OpenAI for Roman Urdu. A failed
+    # synthesis raises (→ /tts 502, the clip is skipped) instead of being voiced by the
+    # English OpenAI voice, which reads Roman Urdu with a Hindi/Indian accent. Off by
+    # default (resilient fallback); turn it on when accent fidelity matters more than
+    # always-having-some-voice. Diagnose Uplift failures via the [TTS] Uplift POST logs.
+    force_uplift = prefer_uplift and os.getenv("FORCE_UPLIFT_FOR_URDU", "").strip().lower() in ("1", "true", "yes", "on")
+    tried = []
+
+    # Send Uplift URDU SCRIPT (it voices Arabic-script Urdu far more naturally than ambiguous
+    # Roman). This transliteration happens HERE — downstream of the chat broadcast, the DB
+    # persist, and the /tts language guard — so the messages table and on-screen text stay
+    # Roman Urdu, untouched. Toggle with URDU_SCRIPT_TTS (default on). The OpenAI fallback
+    # below keeps using the ORIGINAL Roman `text`.
+    urdu_script_tts = os.getenv("URDU_SCRIPT_TTS", "true").strip().lower() in ("1", "true", "yes", "on")
+
+    if prefer_uplift:
+        uplift = _get_tts_provider("uplift")
+        if uplift is not None:
+            tried.append("uplift")
+            uplift_text = text
+            if urdu_script_tts:
+                converted = roman_to_urdu_script(text)
+                if converted and converted != text:
+                    uplift_text = converted
+                    logger.info(f"[TTS] transliterated Roman→Urdu script for Uplift ({len(uplift_text)} chars)")
+            logger.info(f"[TTS] provider → Uplift (lang={language!r}, force={force_uplift}, urdu_script={uplift_text is not text})")
+            try:
+                return uplift.synthesize(uplift_text, language)
+            except Exception as e:
+                if force_uplift:
+                    logger.error(f"[TTS] Uplift failed and FORCE_UPLIFT_FOR_URDU is set — NOT using OpenAI: {e}")
+                    raise
+                logger.warning(f"[TTS] Uplift failed → falling back to OpenAI: {e}")
+                log_failure(None, "tts_provider_fallback", error=str(e)[:200],
+                            recovery="used openai voice")
+        elif force_uplift:
+            logger.error("[TTS] FORCE_UPLIFT_FOR_URDU set but Uplift provider is unavailable (check UPLIFTAI_API_KEY / UPLIFT_ROMAN_URDU_VOICE_ID)")
+            raise VoiceProviderError("Roman Urdu requires Uplift (FORCE_UPLIFT_FOR_URDU=true) but it is not configured")
+
+    openai_tts = _get_tts_provider("openai") or voice_provider
+    if openai_tts is not None:
+        tried.append("openai")
+        logger.info(f"[TTS] provider → OpenAI (lang={language!r})")
+        return openai_tts.synthesize(text, language)
+
+    raise VoiceProviderError(f"No usable TTS provider (tried: {tried or 'none'})")
+
+
+def synthesize_for_language_streaming(text: str, language: Optional[str]):
+    """Generator version of synthesize_for_language — yields MP3 chunks.
+
+    Mirrors the same provider priority / fallback logic as the blocking version.
+    Providers that don't implement synthesize_streaming fall back to their
+    blocking synthesize() which is wrapped in a single-chunk generator.
+    """
+    prefer_uplift = language in ("roman_urdu", "urdu", "mixed")
     tried = []
 
     if prefer_uplift:
@@ -634,18 +793,117 @@ def synthesize_for_language(text: str, language: Optional[str]):
         if uplift is not None:
             tried.append("uplift")
             try:
-                return uplift.synthesize(text, language)
+                yield from uplift.synthesize_streaming(text, language)
+                return
             except Exception as e:
-                logger.warning(f"⚠️ Uplift TTS failed, falling back to OpenAI: {e}")
+                logger.warning(f"⚠️ Uplift TTS streaming failed, falling back to OpenAI: {e}")
                 log_failure(None, "tts_provider_fallback", error=str(e)[:200],
                             recovery="used openai voice")
 
     openai_tts = _get_tts_provider("openai") or voice_provider
     if openai_tts is not None:
         tried.append("openai")
-        return openai_tts.synthesize(text, language)
+        yield from openai_tts.synthesize_streaming(text, language)
+        return
 
     raise VoiceProviderError(f"No usable TTS provider (tried: {tried or 'none'})")
+
+
+# ============================================================
+# Server-side TTS audio cache (process-wide) with in-flight de-duplication
+# ------------------------------------------------------------
+# Every participant's browser runs its own voice queue, so all 3 request /tts for the
+# SAME moderator line — that's N identical OpenAI syntheses for one sentence, and 3N
+# across rooms that share a task intro. This cache collapses them to ONE: the first
+# caller synthesizes while concurrent callers for the same (language, text) WAIT on the
+# in-flight result; later callers hit the cache instantly. Bounded LRU. Fully
+# transparent — any miss, timeout, or error falls through to a normal synthesis, so it
+# can never break or change what is spoken.
+# ============================================================
+_TTS_CACHE_MAX = 512
+# How long a concurrent caller waits for an in-flight synthesis before synthesizing itself.
+# Must exceed the slowest provider (Uplift Urdu + transliteration can take tens of seconds),
+# otherwise the 3 participant requests for one moderator line each give up and re-synthesize,
+# tripling Uplift load and the latency. Generous so the de-dup actually de-dups.
+_TTS_INFLIGHT_WAIT_S = 70.0
+_tts_audio_cache: "OrderedDict[str, bytes]" = OrderedDict()
+_tts_inflight: Dict[str, threading.Event] = {}
+_tts_cache_lock = threading.Lock()
+
+
+def _tts_cache_key(text: str, language: Optional[str]) -> str:
+    return hashlib.sha1(f"{language or ''}\x00{text}".encode("utf-8")).hexdigest()
+
+
+def synthesize_for_language_cached(text: str, language: Optional[str]) -> bytes:
+    """synthesize_for_language() fronted by the shared cache + in-flight de-dup."""
+    key = _tts_cache_key(text, language)
+
+    with _tts_cache_lock:
+        cached = _tts_audio_cache.get(key)
+        if cached is not None:
+            _tts_audio_cache.move_to_end(key)  # LRU touch
+            logger.info(f"[TTS] cache HIT ({language}, {len(cached)} bytes)")
+            return cached
+        ev = _tts_inflight.get(key)
+        owner = ev is None
+        if owner:
+            ev = threading.Event()
+            _tts_inflight[key] = ev
+
+    if owner:
+        logger.info(f"[TTS] cache MISS → synthesizing ({language}, {len(text)} chars)")
+        try:
+            audio = synthesize_for_language(text, language)
+            # Only cache PLAUSIBLE audio. Caching a tiny/empty result (e.g. a provider that
+            # 200s with a non-audio body) would pin a permanently-silent clip for this text
+            # and serve it to every participant + manual replays. Too-small results are
+            # returned once but not cached, so a later attempt can recover.
+            if audio and len(audio) >= 512:
+                with _tts_cache_lock:
+                    _tts_audio_cache[key] = audio
+                    _tts_audio_cache.move_to_end(key)
+                    while len(_tts_audio_cache) > _TTS_CACHE_MAX:
+                        _tts_audio_cache.popitem(last=False)  # evict oldest
+            else:
+                logger.warning(f"[TTS] NOT caching implausible audio ({len(audio or b'')} bytes)")
+            return audio
+        finally:
+            with _tts_cache_lock:
+                _tts_inflight.pop(key, None)
+            ev.set()  # release any waiters (cache hit if we succeeded, else they retry)
+
+    # Someone else is already synthesizing this exact line — wait for their result.
+    logger.info(f"[TTS] in-flight WAIT (≤{_TTS_INFLIGHT_WAIT_S}s) for owner ({language})")
+    _tw = time.time()
+    if ev.wait(timeout=_TTS_INFLIGHT_WAIT_S):
+        with _tts_cache_lock:
+            cached = _tts_audio_cache.get(key)
+            if cached is not None:
+                _tts_audio_cache.move_to_end(key)
+                logger.info(f"[TTS] in-flight WAIT done in {time.time() - _tw:.1f}s → using owner's result")
+                return cached
+        logger.warning(f"[TTS] owner finished in {time.time() - _tw:.1f}s but cached nothing → re-synthesizing")
+    else:
+        logger.warning(f"[TTS] in-flight WAIT TIMED OUT after {_TTS_INFLIGHT_WAIT_S}s → re-synthesizing (owner still slow)")
+    # Owner timed out or failed — synthesize independently (rare; keeps us non-blocking).
+    return synthesize_for_language(text, language)
+
+
+def prewarm_tts_async(text: str, language: Optional[str]) -> None:
+    """Best-effort background warm of the TTS cache (e.g. the deterministic task intro),
+    so the first participant's /tts is a cache hit instead of a cold synthesis."""
+    if not text or not text.strip():
+        return
+
+    def _run():
+        try:
+            synthesize_for_language_cached(text, language)
+            logger.info(f"🔥 TTS prewarmed ({language}, {len(text)} chars)")
+        except Exception as e:
+            logger.debug(f"TTS prewarm skipped: {e}")
+
+    threading.Thread(target=_run, name="tts-prewarm", daemon=True).start()
 
 # ============================================================
 # Register Admin API Blueprint
@@ -1084,14 +1342,38 @@ def extract_ranking_merged_from_chat(room_id: str) -> Optional[List[str]]:
     return out if len(out) == n and len(used) == n else None
 
 
+def _persist_room_ranking(room_id: str, ranking: List[str]) -> None:
+    """Persist a room's final ranking, tolerant of schema drift.
+
+    Writes `final_ranking` + `ranking_submitted_at`. If the deployed `rooms` table is missing
+    the `ranking_submitted_at` column (observed schema drift), PostgREST rejects the whole
+    batch — which would also drop `final_ranking`. So on that specific failure we retry with
+    `final_ranking` alone, guaranteeing the ranking itself is never lost (everything else
+    derives the boolean `ranking_submitted` from `final_ranking`). Other errors propagate.
+    """
+    payload = {
+        "final_ranking": json.dumps(ranking),
+        "ranking_submitted_at": datetime.now(timezone.utc).isoformat(),
+    }
+    try:
+        supabase.table("rooms").update(payload).eq("id", room_id).execute()
+    except Exception as e:
+        msg = str(e).lower()
+        if "ranking_submitted_at" in msg or "column" in msg or "pgrst204" in msg or "schema cache" in msg:
+            logger.warning(
+                "⚠️ rooms.ranking_submitted_at column missing — persisting final_ranking only "
+                "(add the column in Supabase to record the timestamp): %s", e
+            )
+            supabase.table("rooms").update(
+                {"final_ranking": json.dumps(ranking)}
+            ).eq("id", room_id).execute()
+        else:
+            raise
+
+
 def save_auto_ranking(room_id: str, ranking: List[str], source: str) -> bool:
     try:
-        supabase.table("rooms").update(
-            {
-                "final_ranking": json.dumps(ranking),
-                "ranking_submitted_at": datetime.now(timezone.utc).isoformat(),
-            }
-        ).eq("id", room_id).execute()
+        _persist_room_ranking(room_id, ranking)
         td = get_room_task_data(room_id) or get_data()
         comparison = compare_with_expert_ranking(ranking, td)
         logger.info(
@@ -1241,8 +1523,20 @@ def start_research_timer(room_id: str):
 # Helper: Start Task
 # ============================================================
 def start_task_for_room(room_id: str):
-    """Start desert survival task for a room when conditions are met"""
+    """Start desert survival task for a room when conditions are met.
+
+    Serialised per room so two concurrent join_room background tasks can't
+    both pass the 'status == waiting' check and spawn duplicate threads.
+    """
+    lock = _room_task_locks.setdefault(room_id, threading.Lock())
+    with lock:
+        _start_task_for_room_impl(room_id)
+
+
+def _start_task_for_room_impl(room_id: str) -> None:
+    """Inner body of start_task_for_room; caller holds the per-room lock."""
     try:
+        _t_impl0 = time.time()  # latency anchor: lock acquired → first stages
         room = get_room(room_id)
         if not room:
             logger.error(f"❌ Room {room_id} not found")
@@ -1250,6 +1544,10 @@ def start_task_for_room(room_id: str):
 
         participants = get_participants(room_id)
         student_count = len(participants)
+        logger.info(
+            f"⏱️ [LAT] gating reads (get_room+get_participants) "
+            f"+{int((time.time() - _t_impl0) * 1000)}ms ({student_count} students)"
+        )
 
         logger.info(f"📊 Room {room_id}: {student_count} students, status={room['status']}")
 
@@ -1266,64 +1564,120 @@ def start_task_for_room(room_id: str):
             logger.info(f"ℹ️ Room {room_id} waiting for 3 participants (current: {student_count})")
             return
 
+        # In-memory double-start guard (atomic under the per-room lock). This — not the DB
+        # status flip — is the authoritative "already started" check, so all DB writes can
+        # live AFTER the intro broadcast without risking a duplicate task/intro.
+        if room_id in _tasks_started:
+            logger.info(f"ℹ️ Task already started for room {room_id} (in-memory guard)")
+            return
+        _tasks_started.add(room_id)
+
         logger.info(f"🎬 Starting desert survival task for room {room_id} with {student_count} students")
+        _t_task0 = time.time()  # latency-breakdown anchor (→ intro broadcast)
 
-        task_data = resolve_task_data_from_room(room)
-        pin_task_data_for_room(room_id, task_data)
+        task_data = resolve_task_data_from_room(room)   # in-memory, no DB
+        pin_task_data_for_room(room_id, task_data)       # in-memory, no DB
 
-        # Update room status
-        update_room_status(room_id, 'active')
-        room_research_session_started_at[room_id] = time.time()
-        logger.info("⏰ Research session clock started for room %s", room_id[:8])
+        if not task_data:
+            # Degenerate case (missing scenario). Keep prior behavior: flip status + create
+            # the session row so the room isn't left stuck, but there's nothing to speak.
+            logger.error(f"❌ No task data found for room {room_id}")
+            update_room_status(room_id, 'active')
+            room_research_session_started_at[room_id] = time.time()
+            try:
+                session = create_session(
+                    room_id=room_id, mode=room['mode'],
+                    participant_count=student_count,
+                    story_id=room.get('story_id', 'desert_survival'),
+                )
+                room_sessions[room_id] = session['id']
+            except Exception as _se:
+                logger.error(f"create_session failed (no-task path): {_se}")
+            return
 
-        # Create session
-        session = create_session(
-            room_id=room_id,
-            mode=room['mode'],
-            participant_count=student_count,
-            story_id=room.get('story_id', 'desert_survival')
+        # ── CRITICAL PATH: get the moderator SPEAKING as fast as possible ───────────────
+        # Everything the spoken intro needs (room language + task scenario) is already in
+        # memory, so we synthesize + broadcast BEFORE any database write. The research
+        # clock is an in-memory stamp (instant). All DB writes (status / session / chat
+        # persist) are moved AFTER the broadcast so they can never delay speech.
+        room_lang = get_room_primary_language(room_id)
+        intro = get_story_intro_html(task_data, language=room_lang)
+        room_research_session_started_at[room_id] = time.time()  # in-memory; clock = now
+
+        # What the moderator SPEAKS. The visual card (intro) always stays in English. For a
+        # Roman-Urdu room the moderator speaks a natural Pakistani Roman-Urdu task intro
+        # instead of reading the English scenario aloud — item names live on the card in
+        # canonical English (needed for research matching), so we never translate them.
+        if room_lang == "roman_urdu":
+            _n_items = len(task_data.get("items") or []) or 12
+            spoken_intro = roman_urdu_spoken_intro(_n_items)
+        else:
+            spoken_intro = _clean_speakable(intro)
+        _intro_lang = get_room_language(room_id) or detect_language(spoken_intro)
+
+        # 1) Kick off TTS synthesis of the SPOKEN text FIRST (off-thread). Synthesis overlaps
+        #    the broadcast + all DB writes; the in-flight de-dup collapses the 3 participant
+        #    /tts requests onto this one job, so the first request is a warm/in-flight hit.
+        try:
+            prewarm_tts_async(spoken_intro, _intro_lang)
+            logger.info(
+                f"🔥 [LAT] intro TTS prewarm dispatched +{int((time.time() - _t_impl0) * 1000)}ms "
+                f"({_intro_lang}, {len(spoken_intro)} chars, "
+                f"spoken={'RU-template' if room_lang == 'roman_urdu' else 'card-text'})"
+            )
+        except Exception as _pw_ex:
+            logger.debug(f"Intro TTS prewarm skipped: {_pw_ex}")
+
+        # 2) BROADCAST the intro NOW — before ANY DB write. The card HTML stays English; for
+        #    Roman Urdu we attach speak_text so the client SPEAKS the Roman-Urdu template
+        #    instead of toSpeechText(card). (English rooms omit it → unchanged behavior.)
+        _intro_extra = {"content_format": "html", "message_type": "task"}
+        if room_lang == "roman_urdu":
+            _intro_extra["speak_text"] = spoken_intro
+        socketio.emit(
+            "receive_message",
+            chat_socket_payload("Moderator", intro, **_intro_extra),
+            room=room_id,
         )
-        room_sessions[room_id] = session['id']
+        logger.info(
+            f"📋 [LAT] intro BROADCAST +{int((time.time() - _t_impl0) * 1000)}ms "
+            f"(from lock acquire), +{int((time.time() - _t_task0) * 1000)}ms from task-start gate, "
+            f"lang={room_lang}, spoken_lang={_intro_lang}"
+        )
 
-        # Send task intro — localized to the room's primary language when there is
-        # already context (e.g. waiting-room chatter); defaults to English otherwise.
-        if task_data:
-            room_lang = get_room_primary_language(room_id)
-            intro = get_story_intro_html(task_data, language=room_lang)
-            logger.info(f"📋 Sending task intro (HTML, {room_lang}) to room {room_id}")
-
+        # 3) ── OFF THE CRITICAL PATH: persistence + research setup (never blocks speech) ──
+        #    Guarded so a DB hiccup can't stop the moderator loop from starting.
+        try:
+            update_room_status(room_id, 'active')
+        except Exception as _us:
+            logger.error(f"update_room_status failed (post-broadcast): {_us}")
+        try:
+            session = create_session(
+                room_id=room_id, mode=room['mode'],
+                participant_count=student_count,
+                story_id=room.get('story_id', 'desert_survival'),
+            )
+            room_sessions[room_id] = session['id']
+        except Exception as _se:
+            logger.error(f"create_session failed (post-broadcast): {_se}")
+        try:
             add_message(
-                room_id=room_id,
-                username="Moderator",
-                message=intro,
+                room_id=room_id, username="Moderator", message=intro,
                 message_type="task",
                 metadata={"content_format": "html", "kind": "task_intro"},
             )
+        except Exception as _am:
+            logger.error(f"intro add_message persist failed (post-broadcast): {_am}")
+        logger.info(f"💾 [LAT] DB setup done +{int((time.time() - _t_impl0) * 1000)}ms (off critical path)")
 
-            socketio.emit(
-                "receive_message",
-                chat_socket_payload(
-                    "Moderator",
-                    intro,
-                    content_format="html",
-                    message_type="task",
-                ),
-                room=room_id,
-            )
-
-            # Start research timer (15m from clock above — not room creation time)
-            logger.info("⏰ Calling start_research_timer for room %s", room_id[:8])
-            start_research_timer(room_id)
-
-            # Start appropriate moderator based on condition
-            if room['mode'] == 'passive':
-                logger.info(f"🔴 Starting PASSIVE moderator for room {room_id}")
-                start_passive_moderator(room_id)
-            else:  # active mode
-                logger.info(f"🟢 Starting ACTIVE moderator for room {room_id}")
-                start_active_moderator(room_id)
+        # 4) Start the research timer + moderator loop (status is 'active' by now).
+        start_research_timer(room_id)
+        if room['mode'] == 'passive':
+            logger.info(f"🔴 Starting PASSIVE moderator for room {room_id}")
+            start_passive_moderator(room_id)
         else:
-            logger.error(f"❌ No task data found for room {room_id}")
+            logger.info(f"🟢 Starting ACTIVE moderator for room {room_id}")
+            start_active_moderator(room_id)
 
     except Exception as e:
         logger.error(f"❌ Error starting task for room {room_id}: {e}", exc_info=True)
@@ -1333,10 +1687,18 @@ def start_task_for_room(room_id: str):
 # ============================================================
 def start_active_moderator(room_id: str):
     """Active moderator with proactive guidance as per experiment design"""
-    
+    existing = active_monitors.get(room_id)
+    if existing is not None and existing.is_alive():
+        logger.warning(
+            "🟢 Active moderator already running for room %s — skipping duplicate start",
+            room_id[:8],
+        )
+        return existing
+
     def monitor_loop():
         logger.info(f"🟢 ACTIVE moderator started for room {room_id}")
-        
+
+        _wake = _get_wake_event(room_id)
         last_intervention_time = time.time()
         last_dominance_check = time.time()
         last_silence_check = time.time()
@@ -1346,11 +1708,15 @@ def start_active_moderator(room_id: str):
         silent_third_sent: Set[str] = set()
         # Track last time we sent a dominance message for each user
         last_dominance_message: Dict[str, float] = {}
-        
+
         while True:
             try:
-                time.sleep(5)  # Check every 5 seconds
-                
+                # React the instant a student speaks (nudge_moderator sets the event), but
+                # still wake every 5s for time-based checks (silence / time warnings). Same
+                # cadence + conditions as a blind sleep(5) — just lower reactive latency.
+                _wake.wait(timeout=5)
+                _wake.clear()
+
                 room = get_room(room_id)
                 if not room or room.get('story_finished') or room['status'] == 'completed':
                     logger.info(f"⏹️ Active moderator stopped for room {room_id}")
@@ -1476,27 +1842,60 @@ def start_active_moderator(room_id: str):
                         last_intervention_time = now
 
                 # RQ2: Tone / conflict de-escalation (fast, <~1 min after tense exchange)
-                last_stu = next(
-                    (
-                        m
-                        for m in reversed(messages)
-                        if m.get("username") not in ("Moderator", "System", None, "")
-                    ),
-                    None,
-                )
-                if last_stu and now - last_intervention_time > 50:
-                    mid_c = str(last_stu.get("id", ""))
-                    tense = message_suggests_interpersonal_conflict(
-                        last_stu.get("message", "")
-                    ) or recent_multispeaker_tension(messages)
-                    if tense and mid_c and mid_c != str(
-                        aux.get("last_conflict_deescalation_id") or ""
+                # Isolated: a failure here must not skip the question-answering path below.
+                try:
+                    last_stu = next(
+                        (
+                            m
+                            for m in reversed(messages)
+                            if m.get("username") not in ("Moderator", "System", None, "")
+                        ),
+                        None,
+                    )
+                    if last_stu and now - last_intervention_time > 50:
+                        mid_c = str(last_stu.get("id", ""))
+                        tense = message_suggests_interpersonal_conflict(
+                            last_stu.get("message", "")
+                        ) or recent_multispeaker_tension(messages)
+                        if tense and mid_c and mid_c != str(
+                            aux.get("last_conflict_deescalation_id") or ""
+                        ):
+                            aux["last_conflict_deescalation_id"] = mid_c
+                            line = enforce_response_length(
+                                "I'm hearing some friction—let's keep this respectful and collaborative. "
+                                "Can each of you offer **one** concrete change to your **12-item** ranking?",
+                                55,
+                            )
+                            add_message(room_id, "Moderator", line, "moderator")
+                            socketio.emit(
+                                "receive_message",
+                                chat_socket_payload("Moderator", line),
+                                room=room_id,
+                            )
+                            log_moderator_intervention(
+                                room_id,
+                                "conflict_resolution",
+                                last_stu.get("username"),
+                            )
+                            last_intervention_time = now
+                except Exception as _rq2_ex:
+                    logger.error(f"⚠️ Conflict de-escalation (RQ2) skipped: {_rq2_ex}")
+
+                # RQ4: Refocus when chat drifts off ranking / items (at most ~every 2 min)
+                # Isolated: a failure here must not skip the question-answering path below.
+                try:
+                    if (
+                        not skip_nonessential
+                        and time_elapsed >= 4
+                        and discussion_appears_off_task(messages, canonical_items)
+                        and now - float(aux.get("last_drift_nudge_time") or 0) > 120
+                        and now - last_intervention_time > 55
                     ):
-                        aux["last_conflict_deescalation_id"] = mid_c
+                        aux["last_drift_nudge_time"] = now
                         line = enforce_response_length(
-                            "I'm hearing some friction—let's keep this respectful and collaborative. "
-                            "Can each of you offer **one** concrete change to your **12-item** ranking?",
-                            55,
+                            "Quick refocus: you need **one agreed order for all 12 desert items** (1 = most important). "
+                            "Which position is the group most uncertain about?",
+                            50,
                         )
                         add_message(room_id, "Moderator", line, "moderator")
                         socketio.emit(
@@ -1504,35 +1903,10 @@ def start_active_moderator(room_id: str):
                             chat_socket_payload("Moderator", line),
                             room=room_id,
                         )
-                        log_moderator_intervention(
-                            room_id,
-                            "conflict_resolution",
-                            last_stu.get("username"),
-                        )
+                        log_moderator_intervention(room_id, "discussion_drift", None)
                         last_intervention_time = now
-
-                # RQ4: Refocus when chat drifts off ranking / items (at most ~every 2 min)
-                if (
-                    not skip_nonessential
-                    and time_elapsed >= 4
-                    and discussion_appears_off_task(messages, canonical_items)
-                    and now - float(aux.get("last_drift_nudge_time") or 0) > 120
-                    and now - last_intervention_time > 55
-                ):
-                    aux["last_drift_nudge_time"] = now
-                    line = enforce_response_length(
-                        "Quick refocus: you need **one agreed order for all 12 desert items** (1 = most important). "
-                        "Which position is the group most uncertain about?",
-                        50,
-                    )
-                    add_message(room_id, "Moderator", line, "moderator")
-                    socketio.emit(
-                        "receive_message",
-                        chat_socket_payload("Moderator", line),
-                        room=room_id,
-                    )
-                    log_moderator_intervention(room_id, "discussion_drift", None)
-                    last_intervention_time = now
+                except Exception as _rq4_ex:
+                    logger.error(f"⚠️ Drift refocus (RQ4) skipped: {_rq4_ex}")
                 
                 # ===== ACTIVE MODERATOR RULES =====
                 
@@ -1567,7 +1941,8 @@ def start_active_moderator(room_id: str):
                                 time_elapsed=time_elapsed,
                                 last_intervention_time=int(now - last_intervention_time),
                                 dominance_detected=dominant_user,
-                                silent_user=None
+                                silent_user=None,
+                                language=get_room_primary_language(room_id),
                             )
                             
                             # If LLM fails, use fallback
@@ -1734,6 +2109,7 @@ def start_active_moderator(room_id: str):
                                 ),
                                 dominance_detected=None,
                                 silent_user=silent_user,
+                                language=get_room_primary_language(room_id),
                             )
 
                             if not response or len(response) < 10:
@@ -1806,77 +2182,80 @@ def start_active_moderator(room_id: str):
                     last_msg = messages[-1]
                     if last_msg.get('username') != 'Moderator':
                         lm_id_q = str(last_msg.get("id", ""))
-                        handled_at_mod = lm_id_q and lm_id_q == str(
-                            aux.get("last_at_mod_reply_for_msg_id") or ""
-                        )
-                        if not handled_at_mod:
-                            msg_content = last_msg.get('message', '').lower()
+                        msg_content = last_msg.get('message', '').lower()
 
-                            # Check if it's a question (contains ? or question words)
-                            is_question = False
-                            if '?' in msg_content:
-                                is_question = True
-                            else:
-                                question_words = ['what', 'how', 'why', 'when', 'where', 'which', 'who',
-                                                 'explain', 'help', 'confused', 'not sure', 'do we', 'should we',
-                                                 'can you', 'could you', 'would you', 'tell me', 'guide']
-                                for word in question_words:
-                                    if word in msg_content:
-                                        is_question = True
-                                        break
-
-                            # Also check for question phrases
-                            question_phrases = ['what to do', 'what next', 'how to', 'what is', 'what are',
-                                               'what should', 'how do', 'can you help', 'need help']
-                            for phrase in question_phrases:
-                                if phrase in msg_content:
+                        # Check if it's a question (contains ? or question words)
+                        is_question = False
+                        if '?' in msg_content:
+                            is_question = True
+                        else:
+                            question_words = ['what', 'how', 'why', 'when', 'where', 'which', 'who',
+                                             'explain', 'help', 'confused', 'not sure', 'do we', 'should we',
+                                             'can you', 'could you', 'would you', 'tell me', 'guide']
+                            for word in question_words:
+                                if word in msg_content:
                                     is_question = True
                                     break
 
-                            if is_question and (
-                                _mentions_moderator(msg_content) or (now - last_intervention_time > 30)
-                            ):
-                                logger.info(f"❓ Question detected from {last_msg.get('username')}: {msg_content[:100]}...")
+                        # Also check for question phrases
+                        question_phrases = ['what to do', 'what next', 'how to', 'what is', 'what are',
+                                           'what should', 'how do', 'can you help', 'need help']
+                        for phrase in question_phrases:
+                            if phrase in msg_content:
+                                is_question = True
+                                break
 
-                                response = generate_active_moderator_response(
-                                    participants=participant_names,
-                                    chat_history=[{"sender": m['username'], "message": m['message']} for m in messages],
-                                    task_context=f"Desert survival ranking. {room_state_brief(room_id)}",
-                                    time_elapsed=time_elapsed,
-                                    last_intervention_time=int(now - last_intervention_time),
-                                    dominance_detected=None,
-                                    silent_user=None
+                        # @moderator questions are handled immediately by the inline path
+                        # in send_message_handler; exclude them here. _claim_reply_to() is
+                        # the ATOMIC dedup — it claims the message id under a lock, so the
+                        # inline path and this loop can never both answer the same turn (and
+                        # the same question can't re-trigger on a later tick).
+                        if (
+                            is_question
+                            and not _mentions_moderator(msg_content)
+                            and (now - last_intervention_time > 30)
+                            and _claim_reply_to(room_id, lm_id_q)
+                        ):
+                            logger.info(f"❓ Question detected from {last_msg.get('username')}: {msg_content[:100]}...")
+
+                            response = generate_active_moderator_response(
+                                participants=participant_names,
+                                chat_history=[{"sender": m['username'], "message": m['message']} for m in messages],
+                                task_context=f"Desert survival ranking. {room_state_brief(room_id)}",
+                                time_elapsed=time_elapsed,
+                                last_intervention_time=int(now - last_intervention_time),
+                                dominance_detected=None,
+                                silent_user=None,
+                                language=get_room_primary_language(room_id),
+                            )
+
+                            if response and len(response.strip()) > 10:
+                                add_message(room_id, "Moderator", response.strip(), "moderator")
+                                socketio.emit(
+                                    "receive_message",
+                                    chat_socket_payload("Moderator", response.strip()),
+                                    room=room_id,
                                 )
+                                log_moderator_intervention(room_id, "answered_question", last_msg.get('username'))
+                                last_intervention_time = now
+                                logger.info(f"✅ Answered question from {last_msg.get('username')}: {response[:100]}...")
+                            else:
+                                fallback = "Your task is to rank the 12 desert survival items from most important (1) to least important (12). Discuss with your group and agree on a final ranking."
 
-                                if response and len(response.strip()) > 10:
-                                    add_message(room_id, "Moderator", response.strip(), "moderator")
-                                    socketio.emit(
-                                        "receive_message",
-                                        chat_socket_payload("Moderator", response.strip()),
-                                        room=room_id,
-                                    )
+                                if 'time' in msg_content or 'minute' in msg_content:
+                                    fallback = f"You have about {time_remaining} minutes remaining to complete the ranking task."
+                                elif 'item' in msg_content or 'rank' in msg_content:
+                                    fallback = "You need to rank the 12 items from most important (1) to least important (12) for desert survival. Discuss with your group and reach consensus."
 
-                                    log_moderator_intervention(room_id, "answered_question", last_msg.get('username'))
-                                    last_intervention_time = now
-                                    logger.info(f"✅ Answered question from {last_msg.get('username')}: {response[:100]}...")
-                                else:
-                                    fallback = "Your task is to rank the 12 desert survival items from most important (1) to least important (12). Discuss with your group and agree on a final ranking."
-
-                                    if 'time' in msg_content or 'minute' in msg_content:
-                                        fallback = f"You have about {time_remaining} minutes remaining to complete the ranking task."
-                                    elif 'item' in msg_content or 'rank' in msg_content:
-                                        fallback = "You need to rank the 12 items from most important (1) to least important (12) for desert survival. Discuss with your group and reach consensus."
-
-                                    add_message(room_id, "Moderator", fallback, "moderator")
-                                    socketio.emit(
-                                        "receive_message",
-                                        chat_socket_payload("Moderator", fallback),
-                                        room=room_id,
-                                    )
-
-                                    log_moderator_intervention(room_id, "answered_question_fallback", last_msg.get('username'))
-                                    last_intervention_time = now
-                                    logger.info(f"✅ Sent fallback answer to {last_msg.get('username')}")
+                                add_message(room_id, "Moderator", fallback, "moderator")
+                                socketio.emit(
+                                    "receive_message",
+                                    chat_socket_payload("Moderator", fallback),
+                                    room=room_id,
+                                )
+                                log_moderator_intervention(room_id, "answered_question_fallback", last_msg.get('username'))
+                                last_intervention_time = now
+                                logger.info(f"✅ Sent fallback answer to {last_msg.get('username')}")
 
                 # RULE 4.25: Brief appreciation for substantive item-focused reasoning (low frequency)
                 _app_sub = (
@@ -1917,6 +2296,7 @@ def start_active_moderator(room_id: str):
                             last_intervention_time=int(now - last_intervention_time),
                             dominance_detected=None,
                             silent_user=None,
+                            language=get_room_primary_language(room_id),
                         )
                         if _resp_ap and len(_resp_ap.strip()) > 12:
                             add_message(
@@ -2067,6 +2447,13 @@ def _passive_dedupe_key(msg: Dict[str, Any]) -> str:
 
 def start_passive_moderator(room_id: str):
     """Ultra-minimal: only @moderator (dynamic LLM) + one deduped 5-minute warning."""
+    existing = active_monitors.get(room_id)
+    if existing is not None and existing.is_alive():
+        logger.warning(
+            "🔴 Passive moderator already running for room %s — skipping duplicate start",
+            room_id[:8],
+        )
+        return existing
 
     def monitor_loop():
         logger.info(f"🔴 PASSIVE moderator (minimal) for room {room_id}")
@@ -2075,10 +2462,13 @@ def start_passive_moderator(room_id: str):
         PASSIVE_MAX_AT_MENTIONS = 40
         last_passive_handled_key: Optional[str] = None
         five_min_warning_logged = False
+        _wake = _get_wake_event(room_id)
 
         while True:
             try:
-                time.sleep(3)
+                # Wake immediately on a student message; 3s fallback for time-based checks.
+                _wake.wait(timeout=3)
+                _wake.clear()
 
                 room = get_room(room_id)
                 if not room or room.get("story_finished") or room.get("status") == "completed":
@@ -2411,12 +2801,9 @@ def handle_submit_ranking(data):
     logger.info(f"📊 Final ranking submitted for room {room_id}")
     
     try:
-        # Save to database
-        supabase.table("rooms").update({
-            "final_ranking": json.dumps(ranking),
-            "ranking_submitted_at": datetime.now(timezone.utc).isoformat()
-        }).eq("id", room_id).execute()
-        
+        # Save to database (schema-drift tolerant — never silently loses the ranking)
+        _persist_room_ranking(room_id, ranking)
+
         td = get_room_task_data(room_id) or get_data()
         comparison = compare_with_expert_ranking(ranking, td)
         logger.info(f"📈 Ranking accuracy: {comparison['accuracy_percentage']:.1f}%")
@@ -2659,6 +3046,13 @@ def join_room_handler(data):
 
         join_room(room_id)
 
+        # Dispatch the task-start check NOW (the participant is already persisted), so it
+        # runs CONCURRENTLY with the chat-history fetch + emits below instead of after them.
+        # For the 3rd join this shaves the get_chat_history + get_participants reads (~100-
+        # 300ms) off the time-to-intro. It's a no-op for joins 1-2 and reconnects (gated by
+        # the 3-participant check + in-memory start guard inside start_task_for_room).
+        socketio.start_background_task(lambda: start_task_for_room(room_id))
+
         # Get chat history (private warnings only go to the targeted user)
         history = get_chat_history(room_id)
         chat_history = []
@@ -2718,9 +3112,7 @@ def join_room_handler(data):
             "participants": participant_names,
             "new_user": user_name
         }, room=room_id)
-
-        # Try to start task
-        socketio.start_background_task(lambda: start_task_for_room(room_id))
+        # (task-start was already dispatched above, right after the participant was persisted)
 
     except Exception as e:
         logger.error(f"❌ Error joining room: {e}", exc_info=True)
@@ -2938,7 +3330,13 @@ def send_message_handler(data):
             room=room_id,
         )
 
-        if room.get("mode") == "active" and _mentions_moderator(msg):
+        # @mention → reply synchronously and immediately. Claim the turn FIRST (atomic)
+        # so the monitor loop — which may be woken below — can never also answer it.
+        if (
+            room.get("mode") == "active"
+            and _mentions_moderator(msg)
+            and _claim_reply_to(room_id, saved_chat.get("id"))
+        ):
             try:
                 te = _research_session_minutes_elapsed(room_id, room)
                 participants = get_participants(room_id)
@@ -2960,6 +3358,7 @@ def send_message_handler(data):
                     last_intervention_time=0,
                     dominance_detected=None,
                     silent_user=None,
+                    language=get_room_primary_language(room_id),
                 )
                 rsp = (response or "").strip()
                 if len(rsp) > 8:
@@ -2970,10 +3369,6 @@ def send_message_handler(data):
                         room=room_id,
                     )
                     log_moderator_intervention(room_id, "active_at_mention", sender)
-                    _aux_inline = room_active_moderator_aux.setdefault(room_id, {})
-                    _aux_inline["last_at_mod_reply_for_msg_id"] = str(
-                        saved_chat.get("id", "")
-                    )
             except Exception as atmod_ex:
                 logger.error("Active @moderator inline reply failed: %s", atmod_ex)
 
@@ -2994,6 +3389,12 @@ def send_message_handler(data):
                     log_moderator_intervention(room_id, "item_clarification", sender)
         except Exception as clar_ex:
             logger.debug(f"Item clarification skipped: {clar_ex}")
+
+        # Wake the moderator loop to evaluate this turn NOW instead of waiting out its poll
+        # interval. Done LAST — after any synchronous @mention/clarification reply has been
+        # emitted — so the loop observes the moderator as the last speaker and never stacks
+        # a second response on top of the one this handler just produced.
+        nudge_moderator(room_id)
 
         logger.info(f"✅ Message sent to room {room_id}")
 
@@ -3396,6 +3797,15 @@ def handle_end_session(data):
                 logger.info(f"🛑 Removed active monitor for room {room_id}")
             except:
                 pass
+
+        # Wake the moderator loop one last time so it re-checks status and exits its
+        # wait() immediately instead of lingering for the timeout, then drop the event.
+        _ev = room_moderator_wake.pop(room_id, None)
+        if _ev is not None:
+            _ev.set()
+
+        # Release the in-memory start guard so the room could host a fresh session later.
+        _tasks_started.discard(room_id)
         
         if room_id in research_timers:
             try:
@@ -3536,38 +3946,61 @@ def log_admin_action(action: str, entity_type: str = None, entity_id: str = None
 # ============================================================
 @app.route("/tts", methods=["POST"])
 def tts():
-    """Text-to-speech endpoint → audio/mpeg via the active TTS provider (TTS_PROVIDER env)."""
+    """Text-to-speech endpoint → audio/mpeg via the active TTS provider (TTS_PROVIDER env).
+
+    Uses the blocking synthesize() path so the full audio is buffered before any bytes
+    are sent. This guarantees a correct non-200 status on failure (streaming would have
+    already committed to 200 before the exception is raised).  The tts-1 model is fast
+    enough (~500 ms) that the frontend pre-warm makes the perceived latency negligible.
+    """
     payload = request.get_json(silent=True) or {}
     text = (payload.get("text") or "").strip() or "Hello"
     room_id = (payload.get("room_id") or "").strip()
-    # Language priority: explicit hint > the room's established language (keeps the
-    # moderator voice consistent across turns) > per-message heuristic as last resort.
     language = (payload.get("language") or "").strip()
     if not language and room_id:
         language = get_room_language(room_id) or ""
     if not language:
         language = detect_language(text)
 
-    # 🛡️ Log the RAW text before TTS, then enforce English/Roman-Urdu-only (strip any
-    # foreign script so it's never spoken). Disallowed script is surfaced as a failure.
-    logger.info(f"🔊 TTS raw input ({language}): {text[:120]}")
+    logger.info(f"[TTS] request lang={language!r} room={room_id[:8] or '-'} chars={len(text)}: {text[:100]!r}")
     clean, had_foreign, scripts = sanitize_to_supported(text)
     if had_foreign:
-        logger.warning(f"🛡️ Stripped foreign script before TTS: {[s['script'] for s in scripts]}")
+        logger.warning(f"[TTS] 🛡️ stripped foreign script before TTS: {[s['script'] for s in scripts]}")
         log_failure(room_id or None, "language_guard_tts",
                     scripts=[s["script"] for s in scripts])
         text = clean or text
 
+    # Pakistani Roman-Urdu safety-net: swap any stray Hindi-Sanskrit words for everyday
+    # Pakistani-Urdu ones before synthesis, so the SPOKEN line never carries Hindi
+    # vocabulary even if the LLM slipped. Roman-Urdu/mixed only; English is untouched.
+    if language in ("roman_urdu", "urdu", "mixed"):
+        _pk = enforce_pakistani_roman_urdu(text)
+        if _pk != text:
+            logger.info(f"[TTS] applied Pakistani Roman-Urdu vocab fixes (lang={language!r})")
+            text = _pk
+
     try:
-        audio = synthesize_for_language(text, language)
-        logger.info(f"✅ TTS generated ({language})")
+        _t0 = time.time()
+        # Cache-fronted: identical lines requested by the other participants (or the same
+        # intro in another room) resolve to ONE synthesis instead of N concurrent ones.
+        audio = synthesize_for_language_cached(text, language)
+        _ms = int((time.time() - _t0) * 1000)
+        # Guard: never return a 200 with a non-audio body — that plays nothing on the
+        # client. If we somehow produced one, surface it as an error so the client logs it
+        # and the user isn't left with a silent "Speaking…".
+        if not audio or len(audio) < 256:
+            logger.error(f"[TTS] ❌ produced implausible audio ({len(audio or b'')} bytes) lang={language!r}")
+            log_failure(room_id or None, "tts", error=f"implausible audio {len(audio or b'')}B",
+                        recovery="moderator text remains in chat")
+            return jsonify({"error": "TTS produced no audio"}), 502
+        logger.info(f"[TTS] ✅ generated lang={language!r} synth={_ms}ms bytes={len(audio)}")
         log_event(room_id or None, "tts", {"language": language, "chars": len(text)})
         return send_file(BytesIO(audio), mimetype="audio/mpeg")
     except VoiceProviderError as e:
-        logger.warning(f"⚠️ TTS unavailable: {e}")
+        logger.warning(f"[TTS] ⚠️ unavailable: {e}")
         return jsonify({"error": "TTS unavailable: no voice provider configured"}), 503
     except Exception as e:
-        logger.error(f"❌ TTS error: {e}")
+        logger.error(f"[TTS] ❌ error: {e}")
         log_failure(room_id or None, "tts", error=str(e)[:300], recovery="moderator text remains in chat")
         return jsonify({"error": f"TTS failed: {e}"}), 502
 
@@ -3607,6 +4040,7 @@ def get_message_audio(message_id):
 @app.route("/stt", methods=["POST"])
 def stt():
     """Speech-to-text: stream the uploaded webm/opus blob straight to OpenAI (no ffmpeg/pydub)."""
+    _t_req = time.time()
     logger.info("🎤 STT request")
 
     if openai_client is None:
@@ -3650,21 +4084,29 @@ def stt():
         stt_lang = {"ur": "ur", "urdu": "ur", "roman_urdu": "ur", "en": "en", "english": "en"}.get(lang_hint)
         if stt_lang:
             stt_kwargs["language"] = stt_lang
+        _t_openai = time.time()
         res = openai_client.audio.transcriptions.create(**stt_kwargs)
+        _stt_ms = int((time.time() - _t_openai) * 1000)
         raw_text = (res.text or "").strip()
 
         # ONE structured LLM call returns {language, confidence, normalized_text}.
         # Pure English short-circuits with NO LLM call (zero added latency); any Urdu
         # signal triggers classification + normalization to clean Roman Urdu (Latin).
         # The faithful raw transcript is returned as raw_text and stored unchanged.
+        _t_norm = time.time()
         result = classify_and_normalize(raw_text)
+        _norm_ms = int((time.time() - _t_norm) * 1000)
         normalized = result["normalized_text"]
 
         # The upload was running during transcription and is almost always done by
         # now; wait briefly (not the full timeout) so the token is reliably usable.
         staging_thread.join(timeout=1.5)
 
-        logger.info(f"✅ STT result ({result['language']} {result['confidence']:.2f}): {normalized[:50]}...")
+        _total_ms = int((time.time() - _t_req) * 1000)
+        logger.info(
+            f"✅ STT result ({result['language']} {result['confidence']:.2f}) "
+            f"[transcribe={_stt_ms}ms normalize={_norm_ms}ms total={_total_ms}ms]: {normalized[:50]}..."
+        )
         # Ground-truth event (8.4). No room_id on the STT request; room attribution
         # happens when the resulting message is sent (linked via audio_token).
         log_event(None, "stt", {
