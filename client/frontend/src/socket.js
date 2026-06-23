@@ -14,13 +14,38 @@ const DEBUG_SOCKET = (...args) => {
 
 DEBUG_SOCKET("Initializing socket…");
 
+// ============================================================
+// 🌐 SERVER URL CONFIGURATION
+// ============================================================
 const SERVER_URL = process.env.REACT_APP_SERVER_URL || "http://localhost:5000";
 
 DEBUG_SOCKET("FORCED SERVER_URL =", SERVER_URL);
 
-// ✅ FIXED: Aggressive reconnection settings
+// ✅ EXPORT API_BASE for fetch requests (AutoJoin, ChatRoom, etc.)
+export const API_BASE = SERVER_URL;
+
+// ============================================================
+// 🔌 SOCKET INSTANCE
+// ============================================================
 export const socket = io(SERVER_URL, {
-  // WebSocket first reduces time-to-first-byte vs long-polling (important on Vercel → remote API).
+  transports: ["websocket", "polling"],
+  upgrade: true,
+  autoConnect: true,
+  reconnection: true,
+  reconnectionDelay: 1000,
+  reconnectionDelayMax: 10000,
+  reconnectionAttempts: 15,
+  timeout: 60000,
+  randomizationFactor: 0.5,
+});
+
+// ✅ EXPORT API_BASE for fetch requests (AutoJoin, ChatRoom, etc.)
+export const API_BASE = SERVER_URL;
+
+// ============================================================
+// 🔌 SOCKET INSTANCE
+// ============================================================
+export const socket = io(SERVER_URL, {
   transports: ["websocket", "polling"],
   upgrade: true,
   autoConnect: true,
@@ -57,7 +82,7 @@ socket.on("connect", () => {
       socket.emit("ping", { timestamp: Date.now() });
       DEBUG_SOCKET("📤 HEARTBEAT → ping");
     }
-  }, 15000); // Send ping every 15 seconds (faster than Render's timeout)
+  }, 15000);
 });
 
 socket.on("connect_error", (err) => {
@@ -67,13 +92,11 @@ socket.on("connect_error", (err) => {
 socket.on("disconnect", (reason) => {
   DEBUG_SOCKET("🔌 DISCONNECTED →", reason);
   
-  // Clean up heartbeat on disconnect
   if (window.heartbeatInterval) {
     clearInterval(window.heartbeatInterval);
     window.heartbeatInterval = null;
   }
   
-  // If disconnect was not intentional, force reconnect
   if (reason === "transport close" || reason === "transport error") {
     DEBUG_SOCKET("🔄 Forcing reconnection...");
     setTimeout(() => {
@@ -103,7 +126,6 @@ socket.on("reconnect_error", (err) => {
 
 socket.on("reconnect_failed", () => {
   DEBUG_SOCKET("❌ RECONNECT FAILED - Giving up");
-  // But we never give up because reconnectionAttempts = Infinity
 });
 
 // Transport upgrade events
@@ -115,7 +137,7 @@ socket.io.engine.on("upgradeError", (err) => {
   DEBUG_SOCKET("❌ Upgrade FAILED →", err.message);
 });
 
-// For debugging - log all received events
+// Log all received events
 socket.onAny((event, ...args) => {
   DEBUG_SOCKET(`📥 EVENT RECEIVED → "${event}"`, args);
 });
@@ -143,4 +165,5 @@ socket.emit = (eventName, payload, ...rest) => {
 
 DEBUG_SOCKET("✅ Ultra stable patch loaded - WEBSOCKET FIRST with AGGRESSIVE RECONNECT");
 
+// Expose socket globally for debugging
 window.socket = socket;
