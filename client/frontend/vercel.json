@@ -1,5 +1,5 @@
 {
-   "buildCommand": "npx react-scripts build",
+  "buildCommand": "npx react-scripts build",
   "installCommand": "npm install --legacy-peer-deps",
   "outputDirectory": "build",
   "devCommand": "npx react-scripts start",
@@ -7,6 +7,5 @@
   "env": {
     "DISABLE_ESLINT_PLUGIN": "true",
     "CI": "false"
-
   }
 }
