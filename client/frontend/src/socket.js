@@ -39,24 +39,6 @@ export const socket = io(SERVER_URL, {
   randomizationFactor: 0.5,
 });
 
-// ✅ EXPORT API_BASE for fetch requests (AutoJoin, ChatRoom, etc.)
-export const API_BASE = SERVER_URL;
-
-// ============================================================
-// 🔌 SOCKET INSTANCE
-// ============================================================
-export const socket = io(SERVER_URL, {
-  transports: ["websocket", "polling"],
-  upgrade: true,
-  autoConnect: true,
-  reconnection: true,
-  reconnectionDelay: 1000,
-  reconnectionDelayMax: 10000,
-  reconnectionAttempts: 15,
-  timeout: 60000,
-  randomizationFactor: 0.5,
-});
-
 // ============================================================
 // 🔥 SOCKET LIFECYCLE LOGGING WITH HEARTBEAT
 // ============================================================
