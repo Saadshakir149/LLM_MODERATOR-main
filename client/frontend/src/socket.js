@@ -14,7 +14,7 @@ const DEBUG_SOCKET = (...args) => {
 
 DEBUG_SOCKET("Initializing socket…");
 
-const SERVER_URL = process.env.REACT_APP_API_URL || "http://localhost:5000";
+const SERVER_URL = process.env.REACT_APP_SERVER_URL || "http://localhost:5000";
 
 DEBUG_SOCKET("FORCED SERVER_URL =", SERVER_URL);
 
