@@ -4,7 +4,6 @@
   "outputDirectory": "build",
   "devCommand": "npm start",
   "framework": "create-react-app",
-  "rootDirectory": "client/frontend",
   "env": {
     "DISABLE_ESLINT_PLUGIN": "true",
     "CI": "false"
