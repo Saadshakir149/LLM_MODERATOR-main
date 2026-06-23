@@ -7,7 +7,7 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import remarkBreaks from "remark-breaks";
 import rehypeSanitize from "rehype-sanitize";
-import { socket } from "../socket";
+import { socket, API_BASE } from "../socket"; // ✅ FIXED: Import API_BASE from socket.js
 import {
   MdExitToApp,
   MdContentCopy,
@@ -64,7 +64,8 @@ const DESERT_ITEMS = [
   "A book - 'Edible Animals of the Desert'",
 ];
 
-const API_BASE = process.env.REACT_APP_API_URL || "http://localhost:5000";
+// ✅ REMOVED: const API_BASE = process.env.REACT_APP_API_URL || "http://localhost:5000";
+// ✅ Now using API_BASE from socket.js
 
 // ============================================================
 // 🔤 Roman Urdu transliteration (display + storage stay Latin-only)
