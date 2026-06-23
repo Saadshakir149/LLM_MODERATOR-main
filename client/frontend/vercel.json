@@ -1,8 +1,8 @@
 {
-  "buildCommand": "npx react-scripts build",
+  "buildCommand": "npm run build",
   "installCommand": "npm install --legacy-peer-deps",
   "outputDirectory": "build",
-  "devCommand": "npx react-scripts start",
+  "devCommand": "npm start",
   "framework": "create-react-app",
   "env": {
     "DISABLE_ESLINT_PLUGIN": "true",
