@@ -173,18 +173,32 @@ logger.info("="*60)
 # ============================================================
 load_dotenv()
 
-# Get frontend URL first (needed for CORS)
-# Override with http://localhost:3000 when running the React app locally.
-FRONTEND_URL = os.getenv(
+# Get frontend URL first (needed for CORS and redirects)
+FRONTEND_ENV = os.getenv(
     "FRONTEND_URL",
-    "https://llm-moderator-39gf.vercel.app",
+    "https://llm-moderator-main-s6bx.vercel.app",
 ).strip()
+
+# Parse comma-separated list of origins for CORS configuration
+origins_set = {"http://localhost:3000"}
+for url in FRONTEND_ENV.split(","):
+    url = url.strip()
+    if url:
+        if url.endswith("/"):
+            url = url[:-1]
+        origins_set.add(url)
+
+# Always explicitly allow all known frontend deployment URLs to prevent CORS blockages
+origins_set.add("https://llm-moderator-main-s6bx.vercel.app")
+origins_set.add("https://llm-moderator-main-do.vercel.app")
+origins_set.add("https://llm-moderator-39gf.vercel.app")
+
+allowed_origins = list(origins_set)
+
+# Define FRONTEND_URL as the primary single origin for link/redirect generation
+FRONTEND_URL = FRONTEND_ENV.split(",")[0].strip()
 if FRONTEND_URL.endswith('/'):
     FRONTEND_URL = FRONTEND_URL[:-1]
-
-# Restrict CORS to the configured frontend origin; always allow localhost:3000 for dev.
-# Participant socket/REST flow stays open to these origins; unknown origins are rejected.
-allowed_origins = list({FRONTEND_URL, "http://localhost:3000"})
 
 logger.info(f"🔒 CORS allowed origins: {allowed_origins}")
 
