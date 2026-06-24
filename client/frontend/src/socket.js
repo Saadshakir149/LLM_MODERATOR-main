@@ -17,7 +17,7 @@ DEBUG_SOCKET("Initializing socket…");
 // ============================================================
 // 🌐 SERVER URL CONFIGURATION
 // ============================================================
-const SERVER_URL = process.env.REACT_APP_SERVER_URL || "http://localhost:5000";
+const SERVER_URL = "https://llm-moderator-main.onrender.com";
 
 DEBUG_SOCKET("FORCED SERVER_URL =", SERVER_URL);
 

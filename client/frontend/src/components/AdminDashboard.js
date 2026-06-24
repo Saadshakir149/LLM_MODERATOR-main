@@ -30,7 +30,7 @@ import {
   MdAutoMode  
 } from 'react-icons/md';
 
-const API_URL = process.env.REACT_APP_API_URL || 'http://localhost:5000';
+const API_URL = process.env.REACT_APP_API_URL || 'https://llm-moderator-main.onrender.com';
 const FRONTEND_URL = window.location.origin;
 
 // Admin token (prefilled from env if provided; can also be typed into the header field).

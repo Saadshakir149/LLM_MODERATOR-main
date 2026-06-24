@@ -4,17 +4,16 @@
 // =========================
 import React, { useEffect, useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { socket } from '../socket'; // 👈 IMPORT SOCKET
+import { socket, API_BASE } from '../socket'; // 👈 IMPORT BOTH
 
-const API_URL = process.env.REACT_APP_API_URL || 'http://localhost:5000';
+// ❌ REMOVE THIS LINE:
+// const API_URL = process.env.REACT_APP_API_URL || 'http://localhost:5000';
 
 export default function AutoJoin() {
   const { mode } = useParams();
   const navigate = useNavigate();
   const [error, setError] = useState(null);
   const [loading, setLoading] = useState(false);
-  // Participants pick their group's language BEFORE joining, so the moderator speaks
-  // it from the very first turn (no waiting for an Urdu message to be detected).
   const [language, setLanguage] = useState('en');
 
   const joinRoom = async () => {
@@ -30,12 +29,12 @@ export default function AutoJoin() {
         });
       }
 
-      const response = await fetch(`${API_URL}/join/${mode}`);
+      // ✅ USE API_BASE from socket.js
+      const response = await fetch(`${API_BASE}/join/${mode}`);
       const data = await response.json();
       if (!response.ok) throw new Error(data.error || 'Failed to join room');
 
       const userName = data.user_name || `Student ${Math.floor(Math.random() * 1000)}`;
-      // Carry the chosen language so ChatRoom sends it in join_room and the room pins it.
       navigate(
         `/chat/${data.room_id}?userName=${encodeURIComponent(userName)}&language=${encodeURIComponent(language)}`
       );
