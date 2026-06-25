@@ -311,27 +311,63 @@ export default function AdminDashboard() {
   // Download the room's full spoken conversation as ONE ordered audio file.
   // Admin-gated server endpoint; the private audio bucket is never exposed.
   const downloadRoomRecording = async (roomId) => {
+    if (exportingRecordingId === roomId) {
+      console.log('⏳ Already downloading this recording');
+      return;
+    }
+    
     try {
       setExportingRecordingId(roomId);
-      const res = await fetchAdmin(`${API_URL}/api/room/${roomId}/recording?format=mp3`);
-      if (!res.ok) {
-        let msg = 'Recording export failed';
-        try { msg = (await res.json()).error || msg; } catch (_) { /* non-JSON */ }
-        throw new Error(msg);
+      console.log(`📥 Starting download for room ${roomId}`);
+      
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 120000); // 120 seconds timeout
+      
+      const token = adminToken || localStorage.getItem('adminToken') || process.env.REACT_APP_ADMIN_TOKEN || '';
+      
+      const response = await fetch(`${API_URL}/api/room/${roomId}/recording?format=mp3`, {
+        headers: {
+          'X-Admin-Token': token
+        },
+        signal: controller.signal
+      });
+      
+      clearTimeout(timeoutId);
+      
+      if (!response.ok) {
+        let errorText = 'Recording export failed';
+        try {
+          const jsonErr = await response.json();
+          errorText = jsonErr.error || errorText;
+        } catch (_) {
+          try {
+            errorText = await response.text();
+          } catch (__) {}
+        }
+        throw new Error(errorText);
       }
-      const blob = await res.blob();
+      
+      const blob = await response.blob();
+      console.log(`✅ Download complete: ${blob.size} bytes`);
+      
       const url = window.URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
       a.download = `room_${roomId}_recording.mp3`;
       document.body.appendChild(a);
       a.click();
-      window.URL.revokeObjectURL(url);
       document.body.removeChild(a);
+      window.URL.revokeObjectURL(url);
       alert('✅ Conversation recording downloaded');
+      
     } catch (err) {
-      console.error('Recording download failed:', err);
-      alert(`❌ Recording download failed: ${err.message}`);
+      if (err.name === 'AbortError') {
+        console.warn('⏹️ Download was cancelled (timeout or user action)');
+        alert('❌ Recording download timed out (exceeded 2 minutes).');
+      } else {
+        console.error('❌ Recording download failed:', err);
+        alert(`❌ Recording download failed: ${err.message}`);
+      }
     } finally {
       setExportingRecordingId(null);
     }
