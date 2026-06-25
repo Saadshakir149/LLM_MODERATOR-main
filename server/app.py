@@ -78,6 +78,7 @@ from supabase_client import (
     download_voice_object,
     persist_moderator_tts,
     check_required_schema,
+    voice_recording_file_exists,
 )
 from audio_export import concat_clips, assembly_available, AudioAssemblyError
 
@@ -4198,8 +4199,22 @@ def download_room_recording(room_id: str):
     if voice_provider is not None:
         for m in messages:
             mid = m.get("id")
-            if not mid or m.get("username") != "Moderator" or mid in recs_by_msg:
+            if not mid or m.get("username") != "Moderator":
                 continue
+            
+            needs_synth = False
+            rec = recs_by_msg.get(mid)
+            if not rec or not rec.get("storage_path"):
+                needs_synth = True
+            else:
+                path = rec.get("storage_path")
+                if not voice_recording_file_exists(path):
+                    logger.warning(f"File {path} exists in database but missing from storage. Regenerating.")
+                    needs_synth = True
+
+            if not needs_synth:
+                continue
+
             text = _clean_speakable(m.get("message", ""))[:4000]
             if not text:
                 continue

@@ -165,17 +165,26 @@ def finalize_voice_recording(
         "transcript_text": raw or final,
         "edited_after_stt": bool(raw) and raw != final,
     }
+    existing_data = None
     try:
-        resp = supabase.table("voice_recordings").insert(row).execute()
-        logger.info(f"🎙️ Linked voice recording for message {message_id} → {final_path}")
+        existing = supabase.table("voice_recordings").select("id").eq("message_id", message_id).execute()
+        existing_data = existing.data
+        if existing_data:
+            resp = supabase.table("voice_recordings").update(row).eq("message_id", message_id).execute()
+            logger.info(f"🎙️ Updated voice recording metadata for message {message_id} → {final_path}")
+        else:
+            resp = supabase.table("voice_recordings").insert(row).execute()
+            logger.info(f"🎙️ Linked new voice recording for message {message_id} → {final_path}")
         return resp.data[0] if resp.data else row
     except Exception as e:
-        logger.error(f"❌ Could not insert voice_recordings row for {message_id}: {e}")
-        # Row insert failed — remove the just-moved object so we don't strand bytes.
-        try:
-            supabase.storage.from_(AUDIO_BUCKET).remove([final_path])
-        except Exception:
-            pass
+        logger.error(f"❌ Could not persist voice_recordings row for {message_id}: {e}")
+        # Only clean up the storage file if it was a new insertion that failed.
+        # This prevents deleting a file that is still referenced by an existing row.
+        if not existing_data:
+            try:
+                supabase.storage.from_(AUDIO_BUCKET).remove([final_path])
+            except Exception:
+                pass
         return None
 
 
@@ -248,6 +257,19 @@ def download_voice_object(path: str) -> bytes:
     return supabase.storage.from_(AUDIO_BUCKET).download(path)
 
 
+def voice_recording_file_exists(storage_path: str) -> bool:
+    """Check if a file exists in the PRIVATE storage bucket."""
+    try:
+        if not storage_path or "/" not in storage_path:
+            return False
+        folder, filename = storage_path.split("/", 1)
+        files = supabase.storage.from_(AUDIO_BUCKET).list(folder)
+        return any(f.get("name") == filename for f in files) if files else False
+    except Exception as e:
+        logger.warning(f"Could not verify existence of storage file {storage_path}: {e}")
+        return False
+
+
 def persist_moderator_tts(
     room_id: str,
     message_id: str,
@@ -283,16 +305,26 @@ def persist_moderator_tts(
         "transcript_text": (text or "").strip(),
         "edited_after_stt": False,
     }
+    existing_data = None
     try:
-        resp = supabase.table("voice_recordings").insert(row).execute()
-        logger.info(f"🗣️ Persisted moderator TTS for message {message_id} → {storage_path}")
+        existing = supabase.table("voice_recordings").select("id").eq("message_id", message_id).execute()
+        existing_data = existing.data
+        if existing_data:
+            resp = supabase.table("voice_recordings").update(row).eq("message_id", message_id).execute()
+            logger.info(f"🗣️ Updated moderator voice_recordings row for {message_id}")
+        else:
+            resp = supabase.table("voice_recordings").insert(row).execute()
+            logger.info(f"🗣️ Persisted moderator TTS for message {message_id} → {storage_path}")
         return resp.data[0] if resp.data else row
     except Exception as e:
-        logger.error(f"❌ Could not insert moderator voice_recordings row for {message_id}: {e}")
-        try:
-            supabase.storage.from_(AUDIO_BUCKET).remove([storage_path])
-        except Exception:
-            pass
+        logger.error(f"❌ Could not persist moderator voice_recordings row for {message_id}: {e}")
+        # Only clean up the storage file if it was a new insertion that failed.
+        # This prevents deleting a file that is still referenced by an existing row.
+        if not existing_data:
+            try:
+                supabase.storage.from_(AUDIO_BUCKET).remove([storage_path])
+            except Exception:
+                pass
         return None
 
 # ============================================================
