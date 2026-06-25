@@ -58,6 +58,7 @@ export default function AdminDashboard() {
   const [settings, setSettings] = useState([]);
   const [selectedRoom, setSelectedRoom] = useState(null);
   const [loading, setLoading] = useState(false);
+  const [exportingRecordingId, setExportingRecordingId] = useState(null);
   const [connectionStatus, setConnectionStatus] = useState('idle'); // idle | loading | ok | error
   const [authError, setAuthError] = useState(null); // visible reason loads fail (e.g. 401)
   const [adminLogs, setAdminLogs] = useState([]);
@@ -311,6 +312,7 @@ export default function AdminDashboard() {
   // Admin-gated server endpoint; the private audio bucket is never exposed.
   const downloadRoomRecording = async (roomId) => {
     try {
+      setExportingRecordingId(roomId);
       const res = await fetchAdmin(`${API_URL}/api/room/${roomId}/recording?format=mp3`);
       if (!res.ok) {
         let msg = 'Recording export failed';
@@ -330,6 +332,8 @@ export default function AdminDashboard() {
     } catch (err) {
       console.error('Recording download failed:', err);
       alert(`❌ Recording download failed: ${err.message}`);
+    } finally {
+      setExportingRecordingId(null);
     }
   };
 
@@ -583,6 +587,7 @@ export default function AdminDashboard() {
               onExportMetrics={downloadRoomMetrics}
               onEndSession={endRoomSession}
               onUpdateStatus={updateRoomStatus}
+              exportingRecordingId={exportingRecordingId}
             />
           )}
           {activeTab === 'logs' && (
@@ -1131,7 +1136,7 @@ function CreateRoomModal({ newRoomData, setNewRoomData, onCreate, onCancel, load
 }
 
 // Room Detail View
-function RoomDetailView({ room, onBack, onDelete, onExportChat, onDownloadRecording, onExportMetrics, onEndSession, onUpdateStatus }) {
+function RoomDetailView({ room, onBack, onDelete, onExportChat, onDownloadRecording, onExportMetrics, onEndSession, onUpdateStatus, exportingRecordingId }) {
   const safeRoom = room || {};
   const safeRoomData = safeRoom.room || {};
   const safeStats = safeRoom.stats || {};
@@ -1216,10 +1221,22 @@ function RoomDetailView({ room, onBack, onDelete, onExportChat, onDownloadRecord
             </button>
             <button
               onClick={() => onDownloadRecording(safeRoomData.id)}
-              className="flex items-center gap-2 px-4 py-2 bg-rose-600 text-white rounded-lg hover:bg-rose-700 transition-colors"
+              disabled={exportingRecordingId === safeRoomData.id}
+              className={`flex items-center gap-2 px-4 py-2 bg-rose-600 text-white rounded-lg hover:bg-rose-700 transition-colors ${
+                exportingRecordingId === safeRoomData.id ? 'opacity-50 cursor-not-allowed' : ''
+              }`}
               title="Assemble all participant + moderator audio into one ordered file"
             >
-              <MdVolumeUp /> Download Conversation Recording
+              {exportingRecordingId === safeRoomData.id ? (
+                <>
+                  <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
+                  <span>Assembling Recording...</span>
+                </>
+              ) : (
+                <>
+                  <MdVolumeUp /> Download Conversation Recording
+                </>
+              )}
             </button>
             <button
               onClick={() => onExportMetrics && onExportMetrics(safeRoomData.id, 'participant')}
