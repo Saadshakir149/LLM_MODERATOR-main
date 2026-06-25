@@ -572,20 +572,37 @@ def get_participants(room_id: str) -> List[Dict[str, Any]]:
 def get_participants_with_details(room_id: str) -> List[Dict[str, Any]]:
     """Get participants with all details including usernames and display names for admin panel."""
     try:
-        response = (
-            supabase.table("participants")
-            .select("id, username, display_name, socket_id, joined_at, anonymous_id")
-            .eq("room_id", room_id)
-            .order("joined_at", desc=False)
-            .execute()
-        )
+        response = None
+        try:
+            response = (
+                supabase.table("participants")
+                .select("id, username, display_name, socket_id, joined_at, anonymous_id")
+                .eq("room_id", room_id)
+                .order("joined_at", desc=False)
+                .execute()
+            )
+        except Exception as query_ex:
+            err_msg = str(query_ex).lower()
+            if "anonymous_id" in err_msg or "column" in err_msg or "42703" in err_msg:
+                logger.warning("⚠️ Column 'anonymous_id' missing from participants table. Using fallback query.")
+                response = (
+                    supabase.table("participants")
+                    .select("id, username, display_name, socket_id, joined_at")
+                    .eq("room_id", room_id)
+                    .order("joined_at", desc=False)
+                    .execute()
+                )
+            else:
+                raise
         
         participants = response.data if response.data else []
         
-        # Ensure display_name is populated
+        # Ensure display_name and anonymous_id are populated
         for p in participants:
             if not p.get('display_name') and p.get('username'):
                 p['display_name'] = p['username']
+            if 'anonymous_id' not in p:
+                p['anonymous_id'] = p.get('id')  # Fallback to participant UUID
         
         logger.info(f"✅ Retrieved {len(participants)} participants with details for room {room_id}")
         return participants
@@ -1536,6 +1553,12 @@ def check_required_schema() -> Dict[str, Any]:
         msg = str(e).lower()
         if "primary_language" in msg or "pgrst204" in msg or "column" in msg:
             missing.append("rooms.primary_language")
+    try:
+        supabase.table("participants").select("anonymous_id").limit(1).execute()
+    except Exception as e:
+        msg = str(e).lower()
+        if "anonymous_id" in msg or "pgrst204" in msg or "column" in msg:
+            missing.append("participants.anonymous_id")
     return {"ok": not missing, "missing": missing}
 
 
