@@ -1,7 +1,7 @@
 import re
 import logging
 
-from server.config import TTSConfig
+from config import TTSConfig
 
 logger = logging.getLogger(__name__)
 

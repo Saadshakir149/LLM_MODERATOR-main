@@ -1,8 +1,8 @@
 import logging
 from typing import Optional
 
-from server.config import TTSConfig
-from server.tts.language import detect_language, get_voice_for_language, should_use_uplift
+from config import TTSConfig
+from tts.language import detect_language, get_voice_for_language, should_use_uplift
 
 logger = logging.getLogger(__name__)
 
@@ -18,7 +18,7 @@ class TTSManager:
         # Initialize Uplift
         if TTSConfig.UPLIFT_API_KEY:
             try:
-                from server.tts.uplift import uplift_tts
+                from tts.uplift import uplift_tts
                 self.uplift = uplift_tts
                 logger.info("✅ Uplift TTS loaded")
             except Exception as e:
@@ -27,7 +27,7 @@ class TTSManager:
         # Initialize OpenAI (for fallback)
         if TTSConfig.OPENAI_API_KEY:
             try:
-                from server.voice_providers import OpenAIVoiceProvider
+                from voice_providers import OpenAIVoiceProvider
                 self.openai = OpenAIVoiceProvider()
                 logger.info("✅ OpenAI TTS loaded (fallback)")
             except Exception as e:
@@ -77,7 +77,7 @@ class TTSManager:
         if not self.openai:
             if TTSConfig.OPENAI_API_KEY:
                 try:
-                    from server.voice_providers import OpenAIVoiceProvider
+                    from voice_providers import OpenAIVoiceProvider
                     self.openai = OpenAIVoiceProvider()
                 except Exception as e:
                     logger.error(f"❌ OpenAI fallback initialization failed: {e}")
@@ -122,7 +122,7 @@ class TTSManager:
         if not (language in ['ur', 'sd'] and TTSConfig.FORCE_UPLIFT_FOR_URDU):
             audio_data = self._synthesize_openai(text)
             if audio_data:
-                from server.supabase_client import upload_audio_to_storage
+                from supabase_client import upload_audio_to_storage
                 storage_path = f"{room_id}/{message_id}.mp3"
                 if upload_audio_to_storage(storage_path, audio_data):
                     logger.info(f"✅ OpenAI audio uploaded to: {storage_path}")

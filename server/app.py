@@ -742,9 +742,9 @@ def synthesize_for_language(text: str, language: Optional[str]) -> bytes:
     """Synthesize `text` choosing Uplift/OpenAI using the unified tts_manager.
     Transliterates Roman Urdu to Urdu script for Uplift when appropriate.
     """
-    from server.tts.tts_manager import tts_manager
-    from server.tts.language import detect_language
-    from server.config import TTSConfig
+    from tts.tts_manager import tts_manager
+    from tts.language import detect_language
+    from config import TTSConfig
     
     lang = language or detect_language(text)
     prefer_uplift = lang in ("roman_urdu", "urdu", "mixed", "ur", "sd")
@@ -4148,7 +4148,7 @@ def ensure_audio_exists(room_id: str, message_id: str, text: str) -> Optional[di
         
         # Generate new audio
         logger.info(f"🔄 Generating missing audio for {message_id}")
-        from server.supabase_client import persist_moderator_tts
+        from supabase_client import persist_moderator_tts
         result = persist_moderator_tts(room_id, message_id, text)
         return result
         

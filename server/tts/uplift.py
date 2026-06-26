@@ -3,7 +3,7 @@ import requests
 import logging
 from typing import Optional
 
-from server.config import TTSConfig
+from config import TTSConfig
 
 logger = logging.getLogger(__name__)
 
@@ -113,7 +113,7 @@ class UpliftTTS:
         storage_path = f"{room_id}/{message_id}.mp3"
         
         try:
-            from server.supabase_client import upload_audio_to_storage
+            from supabase_client import upload_audio_to_storage
             success = upload_audio_to_storage(storage_path, audio_data)
             if success:
                 logger.info(f"✅ Audio uploaded to: {storage_path}")

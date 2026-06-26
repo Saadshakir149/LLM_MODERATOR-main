@@ -321,8 +321,8 @@ def persist_moderator_tts(
         Record data if successful, None otherwise
     """
     try:
-        from server.tts.tts_manager import tts_manager
-        from server.tts.language import detect_language
+        from tts.tts_manager import tts_manager
+        from tts.language import detect_language
         
         # Detect language for logging
         language = detect_language(text)
