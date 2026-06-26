@@ -160,12 +160,15 @@ class UpliftAIVoiceProvider(VoiceProvider):
         # A generic voice id is optional now — the actual id is resolved per
         # language in synthesize(), so the provider can init with just the key.
         self._voice_id = voice_id or os.getenv("UPLIFT_VOICE_ID")
-        # Pakistani Roman-Urdu voice. UPLIFT_ROMAN_URDU_VOICE_ID is the explicit, preferred
-        # name; UPLIFT_VOICE_ID_URDU is kept for backward compat. Set this to a *Pakistani*
-        # Urdu voice id — a wrong/Indian voice id is the usual cause of a Hindi-sounding
-        # moderator even when Uplift IS being used.
+        # Resolve Urdu voice ID, ignoring template placeholders
+        urdu_voice = os.getenv("UPLIFT_ROMAN_URDU_VOICE_ID")
+        if urdu_voice:
+            urdu_voice = urdu_voice.strip()
+            if not urdu_voice or urdu_voice.lower() in ("pakistani-urdu-voice-id", "your-pakistani-urdu-voice-id", "your-voice-id-here"):
+                urdu_voice = None
+
         self._voice_id_urdu = (
-            os.getenv("UPLIFT_ROMAN_URDU_VOICE_ID")
+            urdu_voice
             or os.getenv("UPLIFT_VOICE_ID_URDU")
             or self._voice_id
         )
