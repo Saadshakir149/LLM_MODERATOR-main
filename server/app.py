@@ -738,90 +738,53 @@ def _get_tts_provider(name: str):
     return provider
 
 
-def synthesize_for_language(text: str, language: Optional[str]):
-    """Synthesize `text`, choosing Uplift for Roman Urdu and OpenAI otherwise.
-
-    Falls back to OpenAI if the preferred provider is missing or fails, so TTS
-    never breaks just because Uplift isn't fully configured. Returns MP3 bytes.
+def synthesize_for_language(text: str, language: Optional[str]) -> bytes:
+    """Synthesize `text` choosing Uplift/OpenAI using the unified tts_manager.
+    Transliterates Roman Urdu to Urdu script for Uplift when appropriate.
     """
-    prefer_uplift = language in ("roman_urdu", "urdu", "mixed")
-    # FORCE_UPLIFT_FOR_URDU=true → never fall back to OpenAI for Roman Urdu. A failed
-    # synthesis raises (→ /tts 502, the clip is skipped) instead of being voiced by the
-    # English OpenAI voice, which reads Roman Urdu with a Hindi/Indian accent. Off by
-    # default (resilient fallback); turn it on when accent fidelity matters more than
-    # always-having-some-voice. Diagnose Uplift failures via the [TTS] Uplift POST logs.
-    force_uplift = prefer_uplift and os.getenv("FORCE_UPLIFT_FOR_URDU", "").strip().lower() in ("1", "true", "yes", "on")
-    tried = []
-
-    # Send Uplift URDU SCRIPT (it voices Arabic-script Urdu far more naturally than ambiguous
-    # Roman). This transliteration happens HERE — downstream of the chat broadcast, the DB
-    # persist, and the /tts language guard — so the messages table and on-screen text stay
-    # Roman Urdu, untouched. Toggle with URDU_SCRIPT_TTS (default on). The OpenAI fallback
-    # below keeps using the ORIGINAL Roman `text`.
-    urdu_script_tts = os.getenv("URDU_SCRIPT_TTS", "true").strip().lower() in ("1", "true", "yes", "on")
-
+    from server.tts.tts_manager import tts_manager
+    from server.tts.language import detect_language
+    from server.config import TTSConfig
+    
+    lang = language or detect_language(text)
+    prefer_uplift = lang in ("roman_urdu", "urdu", "mixed", "ur", "sd")
+    force_uplift = prefer_uplift and TTSConfig.FORCE_UPLIFT_FOR_URDU
+    
     if prefer_uplift:
-        uplift = _get_tts_provider("uplift")
-        if uplift is not None:
-            tried.append("uplift")
-            uplift_text = text
-            if urdu_script_tts:
-                converted = roman_to_urdu_script(text)
-                if converted and converted != text:
-                    uplift_text = converted
-                    logger.info(f"[TTS] transliterated Roman→Urdu script for Uplift ({len(uplift_text)} chars)")
-            logger.info(f"[TTS] provider → Uplift (lang={language!r}, force={force_uplift}, urdu_script={uplift_text is not text})")
-            try:
-                return uplift.synthesize(uplift_text, language)
-            except Exception as e:
-                if force_uplift:
-                    logger.error(f"[TTS] Uplift failed and FORCE_UPLIFT_FOR_URDU is set — NOT using OpenAI: {e}")
-                    raise
-                logger.warning(f"[TTS] Uplift failed → falling back to OpenAI: {e}")
-                log_failure(None, "tts_provider_fallback", error=str(e)[:200],
-                            recovery="used openai voice")
-        elif force_uplift:
-            logger.error("[TTS] FORCE_UPLIFT_FOR_URDU set but Uplift provider is unavailable (check UPLIFTAI_API_KEY / UPLIFT_ROMAN_URDU_VOICE_ID)")
-            raise VoiceProviderError("Roman Urdu requires Uplift (FORCE_UPLIFT_FOR_URDU=true) but it is not configured")
-
-    openai_tts = _get_tts_provider("openai") or voice_provider
-    if openai_tts is not None:
-        tried.append("openai")
-        logger.info(f"[TTS] provider → OpenAI (lang={language!r})")
-        return openai_tts.synthesize(text, language)
-
-    raise VoiceProviderError(f"No usable TTS provider (tried: {tried or 'none'})")
+        # Send Uplift URDU SCRIPT (it voices Arabic-script Urdu far more naturally than ambiguous Roman)
+        urdu_script_tts = os.getenv("URDU_SCRIPT_TTS", "true").strip().lower() in ("1", "true", "yes", "on")
+        uplift_text = text
+        if urdu_script_tts:
+            converted = roman_to_urdu_script(text)
+            if converted and converted != text:
+                uplift_text = converted
+                logger.info(f"[TTS] transliterated Roman→Urdu script for Uplift ({len(uplift_text)} chars)")
+        
+        logger.info(f"[TTS] routing Urdu to tts_manager (lang={lang!r})")
+        audio = tts_manager.synthesize(uplift_text)
+        if audio:
+            return audio
+            
+        if force_uplift:
+            logger.error("[TTS] Uplift failed and FORCE_UPLIFT_FOR_URDU is set — NOT using OpenAI fallback")
+            raise VoiceProviderError("Uplift synthesis failed (FORCE_UPLIFT_FOR_URDU=true)")
+            
+        logger.warning("[TTS] Uplift failed → falling back to OpenAI")
+        log_failure(None, "tts_provider_fallback", error="Uplift synthesis failed", recovery="used openai voice")
+        
+    # Standard English / fallback synthesis
+    audio = tts_manager.synthesize(text)
+    if audio:
+        return audio
+        
+    raise VoiceProviderError("No usable TTS provider succeeded")
 
 
 def synthesize_for_language_streaming(text: str, language: Optional[str]):
     """Generator version of synthesize_for_language — yields MP3 chunks.
-
-    Mirrors the same provider priority / fallback logic as the blocking version.
-    Providers that don't implement synthesize_streaming fall back to their
-    blocking synthesize() which is wrapped in a single-chunk generator.
+    Simply yields the synthesized bytes at once.
     """
-    prefer_uplift = language in ("roman_urdu", "urdu", "mixed")
-    tried = []
-
-    if prefer_uplift:
-        uplift = _get_tts_provider("uplift")
-        if uplift is not None:
-            tried.append("uplift")
-            try:
-                yield from uplift.synthesize_streaming(text, language)
-                return
-            except Exception as e:
-                logger.warning(f"⚠️ Uplift TTS streaming failed, falling back to OpenAI: {e}")
-                log_failure(None, "tts_provider_fallback", error=str(e)[:200],
-                            recovery="used openai voice")
-
-    openai_tts = _get_tts_provider("openai") or voice_provider
-    if openai_tts is not None:
-        tried.append("openai")
-        yield from openai_tts.synthesize_streaming(text, language)
-        return
-
-    raise VoiceProviderError(f"No usable TTS provider (tried: {tried or 'none'})")
+    yield synthesize_for_language(text, language)
 
 
 # ============================================================
@@ -4163,6 +4126,37 @@ def _clean_speakable(raw: str) -> str:
     return t
 
 
+def ensure_audio_exists(room_id: str, message_id: str, text: str) -> Optional[dict]:
+    """
+    Ensure audio exists for a message, generate if missing.
+    Uses the new TTS manager. Returns the DB record if successful.
+    """
+    try:
+        # Check if recording exists in DB
+        recording = supabase.table("voice_recordings") \
+            .select("*") \
+            .eq("message_id", message_id) \
+            .execute()
+        
+        if recording.data:
+            rec = recording.data[0]
+            storage_path = rec.get("storage_path")
+            if voice_recording_file_exists(storage_path):
+                return rec
+            else:
+                logger.warning(f"⚠️ File missing from storage: {storage_path}")
+        
+        # Generate new audio
+        logger.info(f"🔄 Generating missing audio for {message_id}")
+        from server.supabase_client import persist_moderator_tts
+        result = persist_moderator_tts(room_id, message_id, text)
+        return result
+        
+    except Exception as e:
+        logger.error(f"❌ ensure_audio_exists failed: {e}")
+        return None
+
+
 @app.route("/api/room/<room_id>/recording", methods=["GET"])
 @require_admin_token
 def download_room_recording(room_id: str):
@@ -4196,35 +4190,20 @@ def download_room_recording(room_id: str):
     }
 
     # Lazily synthesize + persist any missing moderator TTS clips (cached for next time).
-    if voice_provider is not None:
-        for m in messages:
-            mid = m.get("id")
-            if not mid or m.get("username") != "Moderator":
-                continue
-            
-            needs_synth = False
-            rec = recs_by_msg.get(mid)
-            if not rec or not rec.get("storage_path"):
-                needs_synth = True
-            else:
-                path = rec.get("storage_path")
-                if not voice_recording_file_exists(path):
-                    logger.warning(f"File {path} exists in database but missing from storage. Regenerating.")
-                    needs_synth = True
+    for m in messages:
+        mid = m.get("id")
+        if not mid or m.get("username") != "Moderator":
+            continue
 
-            if not needs_synth:
-                continue
+        text = _clean_speakable(m.get("message", ""))[:4000]
+        if not text:
+            continue
 
-            text = _clean_speakable(m.get("message", ""))[:4000]
-            if not text:
-                continue
-            try:
-                audio = voice_provider.synthesize(text, detect_language(text))
-                row = persist_moderator_tts(room_id, str(mid), audio, text)
-                if row:
-                    recs_by_msg[mid] = row
-            except Exception as e:
-                logger.warning(f"Moderator TTS synth/persist skipped for {mid}: {e}")
+        row = ensure_audio_exists(room_id, str(mid), text)
+        if row:
+            recs_by_msg[mid] = row
+        else:
+            logger.warning(f"⚠️ Could not generate audio for {mid}")
 
     # Download each clip server-side, in conversation order.
     clips = []

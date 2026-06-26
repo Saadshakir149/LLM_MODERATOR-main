@@ -270,61 +270,107 @@ def voice_recording_file_exists(storage_path: str) -> bool:
         return False
 
 
+def upload_audio_to_storage(storage_path: str, audio_data: bytes) -> bool:
+    """
+    Upload audio data to Supabase Storage.
+    
+    Args:
+        storage_path: Path in bucket (e.g., "room_id/message_id.mp3")
+        audio_data: Audio data as bytes
+        
+    Returns:
+        True if successful, False otherwise
+    """
+    try:
+        # Use existing AUDIO_BUCKET global variable
+        result = supabase.storage.from_(AUDIO_BUCKET).upload(
+            storage_path,
+            audio_data,
+            {"content-type": "audio/mpeg", "upsert": "true"}
+        )
+        
+        # Check for errors
+        if hasattr(result, 'error') and result.error:
+            logger.error(f"❌ Storage upload error: {result.error}")
+            return False
+        
+        logger.info(f"✅ Audio uploaded to: {storage_path}")
+        return True
+        
+    except Exception as e:
+        logger.error(f"❌ Storage upload exception: {e}")
+        return False
+
+
 def persist_moderator_tts(
     room_id: str,
     message_id: str,
-    audio_bytes: bytes,
     text: str,
-    mime_type: str = "audio/mpeg",
+    voice_id: Optional[str] = None
 ) -> Optional[Dict[str, Any]]:
-    """Store a moderator TTS clip at {room_id}/{message_id}.<ext> and link a voice_recordings row.
-
-    transcript_text holds the spoken text (no STT involved). One row per message
-    (unique message_id), so this is effectively a cache for the export feature.
     """
-    ml = (mime_type or "").lower()
-    ext = "mp3" if ("mpeg" in ml or ml.endswith("mp3")) else "webm"
-    storage_path = f"{room_id}/{message_id}.{ext}"
+    Generate and persist moderator TTS using configured provider.
+    
+    Args:
+        room_id: Room ID
+        message_id: Message ID
+        text: Text to synthesize
+        voice_id: Voice ID (optional)
+        
+    Returns:
+        Record data if successful, None otherwise
+    """
     try:
-        supabase.storage.from_(AUDIO_BUCKET).upload(
-            storage_path,
-            audio_bytes,
-            {"content-type": mime_type or "audio/mpeg", "upsert": "true"},
+        from server.tts.tts_manager import tts_manager
+        from server.tts.language import detect_language
+        
+        # Detect language for logging
+        language = detect_language(text)
+        logger.info(f"📝 Moderator TTS for {language} text")
+        
+        # Generate and upload
+        storage_path = tts_manager.synthesize_and_upload(
+            text, room_id, message_id, voice_id
         )
-    except Exception as e:
-        logger.error(f"❌ Could not upload moderator TTS {storage_path}: {e}")
-        return None
-
-    row = {
-        "message_id": message_id,
-        "room_id": room_id,
-        "storage_path": storage_path,
-        "duration_ms": None,
-        "mime_type": mime_type or "audio/mpeg",
-        "stt_model": None,
-        "transcript_text": (text or "").strip(),
-        "edited_after_stt": False,
-    }
-    existing_data = None
-    try:
-        existing = supabase.table("voice_recordings").select("id").eq("message_id", message_id).execute()
-        existing_data = existing.data
-        if existing_data:
-            resp = supabase.table("voice_recordings").update(row).eq("message_id", message_id).execute()
-            logger.info(f"🗣️ Updated moderator voice_recordings row for {message_id}")
+        
+        if not storage_path:
+            logger.error(f"❌ TTS generation/upload failed for {message_id}")
+            return None
+        
+        # Create database record (schema compatible)
+        row = {
+            "message_id": message_id,
+            "room_id": room_id,
+            "storage_path": storage_path,
+            "duration_ms": None,
+            "mime_type": "audio/mpeg",
+            "stt_model": None,
+            "transcript_text": (text or "").strip(),
+            "edited_after_stt": False,
+        }
+        
+        # Check if record exists (upsert)
+        existing = supabase.table("voice_recordings") \
+            .select("id") \
+            .eq("message_id", message_id) \
+            .execute()
+        
+        if existing.data:
+            result = supabase.table("voice_recordings") \
+                .update(row) \
+                .eq("message_id", message_id) \
+                .execute()
+            logger.info(f"🔄 Updated voice recording for {message_id}")
         else:
-            resp = supabase.table("voice_recordings").insert(row).execute()
-            logger.info(f"🗣️ Persisted moderator TTS for message {message_id} → {storage_path}")
-        return resp.data[0] if resp.data else row
+            result = supabase.table("voice_recordings") \
+                .insert(row) \
+                .execute()
+            logger.info(f"📝 Created voice recording for {message_id}")
+        
+        return result.data[0] if result.data else row
+        
     except Exception as e:
-        logger.error(f"❌ Could not persist moderator voice_recordings row for {message_id}: {e}")
-        # Only clean up the storage file if it was a new insertion that failed.
-        # This prevents deleting a file that is still referenced by an existing row.
-        if not existing_data:
-            try:
-                supabase.storage.from_(AUDIO_BUCKET).remove([storage_path])
-            except Exception:
-                pass
+        logger.error(f"❌ persist_moderator_tts failed: {e}")
         return None
 
 # ============================================================
