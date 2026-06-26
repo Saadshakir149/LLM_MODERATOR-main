@@ -1870,6 +1870,24 @@ export default function ChatRoom() {
                 >
                   {sessionStatus}
                 </span>
+                
+                {/* 📊 Animated Audio Waveform Visualizer */}
+                {isRecording && (
+                  <div className="flex items-end gap-0.5 h-4 ml-3">
+                    <span className="w-0.5 bg-rose-500 rounded-full animate-wave-1"></span>
+                    <span className="w-0.5 bg-rose-500 rounded-full animate-wave-2"></span>
+                    <span className="w-0.5 bg-rose-500 rounded-full animate-wave-3"></span>
+                    <span className="w-0.5 bg-rose-500 rounded-full animate-wave-4"></span>
+                    <span className="w-0.5 bg-rose-500 rounded-full animate-wave-5"></span>
+                  </div>
+                )}
+                {isSpeaking && (
+                  <div className="flex items-end gap-0.5 h-4 ml-3">
+                    <span className="w-0.5 bg-indigo-500 rounded-full animate-wave-2"></span>
+                    <span className="w-0.5 bg-indigo-500 rounded-full animate-wave-3"></span>
+                    <span className="w-0.5 bg-indigo-500 rounded-full animate-wave-4"></span>
+                  </div>
+                )}
               </div>
 
               {/* Big press-and-hold mic button */}
