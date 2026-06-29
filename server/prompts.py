@@ -1005,7 +1005,9 @@ _LANG_TEMPLATES = {
         "qa_fallback_item": "You need to rank the 12 items from most important (1) to least important (12) for desert survival. Discuss with your group and reach consensus.",
         "inappropriate_warning_local": "{last_sender}, please keep our discussion professional and academic. Let's focus on the desert survival task.",
         "inappropriate_warning_socket": "⚠️ Please keep our discussion respectful and professional. Focus on the ideas, not personal attacks. Let's continue with the ranking task.",
-        "item_clarification": "Quick note: on **our list** that item is: **{canon}**."
+        "item_clarification": "Quick note: on **our list** that item is: **{canon}**.",
+        "dominance_fallback_a": "{dominant_user}, thanks for your input. Let's also hear from {other0} and {other1} - what are your thoughts on the item ranking?",
+        "dominance_fallback_b": "{dominant_user}, good points. {other0}, what do you think about this?"
     },
     "roman_urdu": {
         "time_warning_5m": "⚠️ **5 minutes baqi hain!** Baraye meharbani apne **sare 12 items ki mukammal ranking** sab se ahem **(1)** se sab se kam ahem **(12)** tak final karein.",
@@ -1019,7 +1021,9 @@ _LANG_TEMPLATES = {
         "qa_fallback_item": "Aap ko desert survival ke liye 12 items ko sab se ahem (1) se sab se kam ahem (12) tak rank karna hai. Apne group ke sath baat cheet karein aur consensus tak pohanchein.",
         "inappropriate_warning_local": "{last_sender}, baraye meharbani guftagu ko professional aur respectful rakhein. Chaliye desert survival task par focus karte hain.",
         "inappropriate_warning_socket": "⚠️ Baraye meharbani guftagu ko respectful aur professional rakhein. Khayalat par focus karein, zati attacks par nahi. Chaliye ranking task ko jaari rakhte hain.",
-        "item_clarification": "Ek choti si baat: **hamari list** mein wo item **{canon}** hai."
+        "item_clarification": "Ek choti si baat: **hamari list** mein wo item **{canon}** hai.",
+        "dominance_fallback_a": "{dominant_user}, aap ke input ka shukriya. Chaliye ab {other0} aur {other1} se bhi sunte hain - ranking par aap ke kya khayalat hain?",
+        "dominance_fallback_b": "{dominant_user}, ache points hain. {other0}, aap ka is barey mein kya khayal hai?"
     }
 }
 
@@ -1031,6 +1035,54 @@ def get_template_message(template_name: str, language: Optional[str] = "en", **k
         lang = "roman_urdu"
     tpl = _LANG_TEMPLATES[lang].get(template_name, _LANG_TEMPLATES["en"][template_name])
     return tpl.format(**kwargs)
+
+_ACTIVE_PHRASES = {
+    "en": {
+        "invite": [
+            "{name}, we'd love your take—what's one item you'd rank higher or lower?",
+            "{name}, what do you think matters most for survival here?",
+            "Jump in when you can, {name}—any item you want the group to weigh?",
+            "{name}, a quick thought on the ranking would help the group.",
+        ],
+        "followup": [
+            "{name}, still with us? Even a one-line ranking preference helps.",
+            "{name}, no pressure—just share whichever item feels strongest to you.",
+            "{name}, checking in: any item you want to push back on?",
+        ],
+        "followup_deep": [
+            "{name}, we value your input—what's at least one item you'd put near the top?",
+            "{name}, even a single priority (e.g. “1. water”) helps lock the ranking.",
+            "{name}, quick check: which item feels most urgent for survival to you?",
+        ]
+    },
+    "roman_urdu": {
+        "invite": [
+            "{name}, hum aap ki rai chahte hain—aap kis item ko uper ya neechay rank karna chahein ge?",
+            "{name}, aap ke khayal mein yahan survival ke liye sab se zyada kya ahem hai?",
+            "Jab bhi mauqa miley shamil hon, {name}—koi aisa item jis par aap chahte hain group ghaur karey?",
+            "{name}, ranking par ek choti si rai group ki madad kare gi.",
+        ],
+        "followup": [
+            "{name}, aap hamare sath hain? Ek line mein ranking preference bhi madad kare gi.",
+            "{name}, koi pressure nahi hai—bas wo item share karein jo aap ko sab se ahem lagta hai.",
+            "{name}, checking in: koi aisa item jis par aap apna aitraz ya khayal dena chahein?",
+        ],
+        "followup_deep": [
+            "{name}, hum aap ke khayal ki qadar karte hain—kam az kam koi ek item batayein jise aap top par rakhein ge?",
+            "{name}, koi ek priority (jaise ke '1. paani') bhi ranking final karne mein madad kare gi.",
+            "{name}, ek jaldi check: aap ke khayal mein survival ke liye sab se ahem item kaun sa hai?",
+        ]
+    }
+}
+
+def get_active_invite_phrase(category: str, name: str, language: Optional[str] = "en") -> str:
+    lang = (language or "en").strip().lower()
+    if lang not in ("roman_urdu", "mixed"):
+        lang = "en"
+    else:
+        lang = "roman_urdu"
+    phrases = _ACTIVE_PHRASES[lang].get(category, _ACTIVE_PHRASES["en"][category])
+    return random.choice(phrases).format(name=name)
 
 # ============================================================
 # 🟢 ACTIVE MODERATOR PROMPTS (Research Version)

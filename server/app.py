@@ -123,6 +123,7 @@ from prompts import (
     get_language_severity,
     get_template_message,
     get_fallback_feedback,
+    get_active_invite_phrase,
     detect_language,
     detect_language_from_messages,
     normalize_roman_urdu,
@@ -1957,9 +1958,18 @@ def start_active_moderator(room_id: str):
                             # If LLM fails, use fallback
                             if not response or len(response) < 10:
                                 if len(others) >= 2:
-                                    response = f"{dominant_user}, thanks for your input. Let's also hear from {others[0]} and {others[1]} - what are your thoughts on the item ranking?"
+                                    response = get_template_message(
+                                        "dominance_fallback_a", lang,
+                                        dominant_user=dominant_user,
+                                        other0=others[0],
+                                        other1=others[1]
+                                    )
                                 else:
-                                    response = f"{dominant_user}, good points. {others[0]}, what do you think about this?"
+                                    response = get_template_message(
+                                        "dominance_fallback_b", lang,
+                                        dominant_user=dominant_user,
+                                        other0=others[0]
+                                    )
                             
                             add_message(room_id, "Moderator", response, "moderator")
                             socketio.emit(
@@ -1999,7 +2009,7 @@ def start_active_moderator(room_id: str):
                         and deep in participant_names
                         and (now - last_intervention_time > 45)
                     ):
-                        line_d = _pick_phrase(_ACTIVE_FOLLOWUP_DEEP_LINES, deep)
+                        line_d = get_active_invite_phrase("followup_deep", deep, lang)
                         add_message(room_id, "Moderator", line_d, "moderator")
                         socketio.emit(
                             "receive_message",
@@ -2029,7 +2039,7 @@ def start_active_moderator(room_id: str):
                             and follow in participant_names
                             and (now - last_intervention_time > 45)
                         ):
-                            line_fu = _pick_phrase(_ACTIVE_FOLLOWUP_LINES, follow)
+                            line_fu = get_active_invite_phrase("followup", follow, lang)
                             add_message(room_id, "Moderator", line_fu, "moderator")
                             socketio.emit(
                                 "receive_message",
@@ -2129,8 +2139,8 @@ def start_active_moderator(room_id: str):
                             )
 
                             if not response or len(response) < 10:
-                                response = _pick_phrase(
-                                    _ACTIVE_INVITE_LINES, silent_user
+                                response = get_active_invite_phrase(
+                                    "invite", silent_user, lang
                                 )
 
                             add_message(room_id, "Moderator", response, "moderator")
