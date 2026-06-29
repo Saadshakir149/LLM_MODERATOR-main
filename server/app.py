@@ -121,6 +121,7 @@ from prompts import (
     get_random_ending,
     check_inappropriate_language,
     get_language_severity,
+    get_template_message,
     get_fallback_feedback,
     detect_language,
     detect_language_from_messages,
@@ -1722,6 +1723,7 @@ def start_active_moderator(room_id: str):
                 # Get actual participants (excluding Moderator)
                 all_participants = get_participants(room_id)
                 participant_names = [p['username'] for p in all_participants if p['username'] != 'Moderator']
+                lang = get_room_primary_language(room_id)
 
                 # Refresh the full room_state from data already fetched this tick (no
                 # extra query). The moderator reads this brief before generating below.
@@ -1800,13 +1802,8 @@ def start_active_moderator(room_id: str):
                 ):
                     others = [p for p in participant_names if p != streak_user]
                     if others:
-                        force_response = random.choice(
-                            [
-                                f"{streak_user}, you've made several points—let's hear from "
-                                f"{others[0]} on the ranking too.",
-                                f"Thanks {streak_user}—{others[0]}, what's your read on the next priorities?",
-                            ]
-                        )
+                        streak_tpl = random.choice(["turn_balance_streak_a", "turn_balance_streak_b"])
+                        force_response = get_template_message(streak_tpl, lang, streak_user=streak_user, others=others[0])
                         add_message(room_id, "Moderator", force_response, "moderator")
                         socketio.emit(
                             "receive_message",
@@ -1814,7 +1811,10 @@ def start_active_moderator(room_id: str):
                             room=room_id,
                         )
                         log_moderator_intervention(
-                            room_id, "force_turn_balance", streak_user
+                            room_id, "force_turn_balance", streak_user,
+                            reason=f"{streak_user} message streak >= 3",
+                            research_question="RQ3",
+                            expected_effect="Interrupt speaking streak and invite others"
                         )
                         aux["last_turn_balance_msg_id"] = last_mid
                         last_intervention_time = now
@@ -1839,11 +1839,7 @@ def start_active_moderator(room_id: str):
                             aux.get("last_conflict_deescalation_id") or ""
                         ):
                             aux["last_conflict_deescalation_id"] = mid_c
-                            line = enforce_response_length(
-                                "I'm hearing some friction—let's keep this respectful and collaborative. "
-                                "Can each of you offer **one** concrete change to your **12-item** ranking?",
-                                55,
-                            )
+                            line = get_template_message("conflict_deescalation", lang)
                             add_message(room_id, "Moderator", line, "moderator")
                             socketio.emit(
                                 "receive_message",
@@ -1854,6 +1850,9 @@ def start_active_moderator(room_id: str):
                                 room_id,
                                 "conflict_resolution",
                                 last_stu.get("username"),
+                                reason="Interpersonal conflict or multi-speaker tension detected",
+                                research_question="RQ2",
+                                expected_effect="De-escalate tension and prompt compromise"
                             )
                             last_intervention_time = now
                 except Exception as _rq2_ex:
@@ -1870,24 +1869,65 @@ def start_active_moderator(room_id: str):
                         and now - last_intervention_time > 55
                     ):
                         aux["last_drift_nudge_time"] = now
-                        line = enforce_response_length(
-                            "Quick refocus: you need **one agreed order for all 12 desert items** (1 = most important). "
-                            "Which position is the group most uncertain about?",
-                            50,
-                        )
+                        line = get_template_message("drift_refocus", lang)
                         add_message(room_id, "Moderator", line, "moderator")
                         socketio.emit(
                             "receive_message",
                             chat_socket_payload("Moderator", line),
                             room=room_id,
                         )
-                        log_moderator_intervention(room_id, "discussion_drift", None)
+                        log_moderator_intervention(
+                            room_id, "discussion_drift", None,
+                            reason="Discussion appears off-task based on recent student messages",
+                            research_question="RQ4",
+                            expected_effect="Refocus discussion on ranking desert items"
+                        )
                         last_intervention_time = now
                 except Exception as _rq4_ex:
                     logger.error(f"⚠️ Drift refocus (RQ4) skipped: {_rq4_ex}")
                 
                 # ===== ACTIVE MODERATOR RULES =====
                 
+                # RULE 0.5: Check for ranking disagreements (Priority 5 consensus de-escalation)
+                try:
+                    from room_state import get_latest_disagreement
+                    disagreed_rank, items_involved = get_latest_disagreement(room_id)
+                    if (
+                        disagreed_rank
+                        and now - float(aux.get("last_consensus_nudge_time") or 0) > 120
+                        and now - last_intervention_time > 45
+                    ):
+                        aux["last_consensus_nudge_time"] = now
+                        response = generate_active_moderator_response(
+                            participants=participant_names,
+                            chat_history=[{"sender": m['username'], "message": m['message']} for m in messages],
+                            task_context=f"Desert survival ranking. {room_state_brief(room_id)}",
+                            time_elapsed=time_elapsed,
+                            last_intervention_time=int(now - last_intervention_time),
+                            dominance_detected=None,
+                            silent_user=None,
+                            language=lang,
+                            room_id=room_id,
+                            intervention_type="ranking_disagreement"
+                        )
+                        if response and len(response.strip()) > 10:
+                            add_message(room_id, "Moderator", response.strip(), "moderator")
+                            socketio.emit(
+                                "receive_message",
+                                chat_socket_payload("Moderator", response.strip()),
+                                room=room_id,
+                            )
+                            log_moderator_intervention(
+                                room_id, "ranking_disagreement", None,
+                                reason=f"Disagreement detected on Rank #{disagreed_rank} between {items_involved}",
+                                research_question="RQ4",
+                                expected_effect="Facilitate consensus on rank disagreement"
+                            )
+                            last_intervention_time = now
+                            logger.info(f"✅ Sent ranking disagreement consensus nudge for Rank #{disagreed_rank}")
+                except Exception as _rq4_dis_ex:
+                    logger.error(f"⚠️ Ranking disagreement nudge skipped: {_rq4_dis_ex}")
+
                 # RULE 1: Check for dominance (>50% of recent messages)
                 if now - last_dominance_check > 30:  # Check every 30 seconds
                     dominant_user = check_dominance(room_id)
@@ -1921,6 +1961,8 @@ def start_active_moderator(room_id: str):
                                 dominance_detected=dominant_user,
                                 silent_user=None,
                                 language=get_room_primary_language(room_id),
+                                room_id=room_id,
+                                intervention_type="balance_dominance"
                             )
                             
                             # If LLM fails, use fallback
@@ -1938,7 +1980,12 @@ def start_active_moderator(room_id: str):
                             )
                             
                             # Log intervention for research
-                            log_moderator_intervention(room_id, "balance_dominance", dominant_user)
+                            log_moderator_intervention(
+                                room_id, "balance_dominance", dominant_user,
+                                reason=f"{dominant_user} has >50% of recent messages",
+                                research_question="RQ3",
+                                expected_effect="Invite other members to reduce speaker dominance"
+                            )
                             last_intervention_time = now
                             last_dominance_message[dominant_user] = now
                             
@@ -2088,6 +2135,8 @@ def start_active_moderator(room_id: str):
                                 dominance_detected=None,
                                 silent_user=silent_user,
                                 language=get_room_primary_language(room_id),
+                                room_id=room_id,
+                                intervention_type="invite_silent"
                             )
 
                             if not response or len(response) < 10:
@@ -2103,7 +2152,10 @@ def start_active_moderator(room_id: str):
                             )
 
                             log_moderator_intervention(
-                                room_id, "invite_silent", silent_user
+                                room_id, "invite_silent", silent_user,
+                                reason=f"{silent_user} has been silent for {int(silence_threshold)}s+",
+                                research_question="RQ1",
+                                expected_effect="Invite quiet member to increase participation"
                             )
                             last_silent_invite_at[silent_user] = now
                             last_intervention_time = now
@@ -2118,10 +2170,7 @@ def start_active_moderator(room_id: str):
                     and now - last_intervention_time > 60
                     and claim_session_time_warning(room_id, "5")
                 ):
-                    response = (
-                        f"⚠️ **{int(time_remaining)} minutes remaining!** Please finalize your **complete ranking of all 12 items** "
-                        "from most important **(1)** to least important **(12)**."
-                    )
+                    response = get_template_message("time_warning_5m", lang)
                     add_message(room_id, "Moderator", response, "moderator")
                     socketio.emit(
                         "receive_message",
@@ -2129,7 +2178,12 @@ def start_active_moderator(room_id: str):
                         room=room_id,
                     )
                     
-                    log_moderator_intervention(room_id, "time_warning", None)
+                    log_moderator_intervention(
+                        room_id, "time_warning", None,
+                        reason="Time remaining <= 5 minutes",
+                        research_question="RQ4",
+                        expected_effect="Prompt final ranking submission near deadline"
+                    )
                     last_intervention_time = now
                     logger.info(
                         f"✅ Sent time warning: {time_remaining} minutes remaining"
@@ -2141,17 +2195,19 @@ def start_active_moderator(room_id: str):
                     and now - last_intervention_time > 30
                     and claim_session_time_warning(room_id, "1")
                 ):
-                    response = (
-                        "⏰ **Last minute!** Keep your **`1.` … `12.`** lines in chat clear—the server records "
-                        "the ranking automatically at the end."
-                    )
+                    response = get_template_message("time_warning_1m", lang)
                     add_message(room_id, "Moderator", response, "moderator")
                     socketio.emit(
                         "receive_message",
                         chat_socket_payload("Moderator", response),
                         room=room_id,
                     )
-                    log_moderator_intervention(room_id, "time_warning_1m", None)
+                    log_moderator_intervention(
+                        room_id, "time_warning", None,
+                        reason="Time remaining <= 1 minute",
+                        research_question="RQ4",
+                        expected_effect="Enforce clear chat before automated final ranking record"
+                    )
                     last_intervention_time = now
                     logger.info("✅ Sent 1-minute warning (active)")
                 
@@ -2205,6 +2261,8 @@ def start_active_moderator(room_id: str):
                                 dominance_detected=None,
                                 silent_user=None,
                                 language=get_room_primary_language(room_id),
+                                room_id=room_id,
+                                intervention_type="answer_question"
                             )
 
                             if response and len(response.strip()) > 10:
@@ -2214,16 +2272,28 @@ def start_active_moderator(room_id: str):
                                     chat_socket_payload("Moderator", response.strip()),
                                     room=room_id,
                                 )
-                                log_moderator_intervention(room_id, "answered_question", last_msg.get('username'))
+                                log_moderator_intervention(
+                                    room_id, "answer_question", last_msg.get('username'),
+                                    reason=f"Answered question: {msg_content[:50]}",
+                                    research_question="RQ5",
+                                    expected_effect="Directly answer user query"
+                                )
                                 last_intervention_time = now
                                 logger.info(f"✅ Answered question from {last_msg.get('username')}: {response[:100]}...")
                             else:
-                                fallback = "Your task is to rank the 12 desert survival items from most important (1) to least important (12). Discuss with your group and agree on a final ranking."
+                                fallback = get_template_message("qa_fallback_default", lang)
 
                                 if 'time' in msg_content or 'minute' in msg_content:
-                                    fallback = f"You have about {time_remaining} minutes remaining to complete the ranking task."
+                                    fallback = get_template_message("qa_fallback_time", lang, time_remaining=int(time_remaining))
                                 elif 'item' in msg_content or 'rank' in msg_content:
-                                    fallback = "You need to rank the 12 items from most important (1) to least important (12) for desert survival. Discuss with your group and reach consensus."
+                                    fallback = get_template_message("qa_fallback_item", lang)
+                                
+                                log_moderator_intervention(
+                                     room_id, "answer_question", last_msg.get('username'),
+                                     reason=f"Answered question fallback: {msg_content[:50]}",
+                                     research_question="RQ5",
+                                     expected_effect="Directly answer user query with fallback template"
+                                 )
 
                                 add_message(room_id, "Moderator", fallback, "moderator")
                                 socketio.emit(
@@ -2231,7 +2301,7 @@ def start_active_moderator(room_id: str):
                                     chat_socket_payload("Moderator", fallback),
                                     room=room_id,
                                 )
-                                log_moderator_intervention(room_id, "answered_question_fallback", last_msg.get('username'))
+                                pass
                                 last_intervention_time = now
                                 logger.info(f"✅ Sent fallback answer to {last_msg.get('username')}")
 
@@ -2275,6 +2345,8 @@ def start_active_moderator(room_id: str):
                             dominance_detected=None,
                             silent_user=None,
                             language=get_room_primary_language(room_id),
+                            room_id=room_id,
+                            intervention_type="appreciate"
                         )
                         if _resp_ap and len(_resp_ap.strip()) > 12:
                             add_message(
@@ -2287,8 +2359,11 @@ def start_active_moderator(room_id: str):
                             )
                             log_moderator_intervention(
                                 room_id,
-                                "appreciation",
+                                "appreciate",
                                 _lm.get("username"),
+                                reason=f"Appreciate substantive item logic from {_lm.get('username')}",
+                                research_question="RQ1",
+                                expected_effect="Encourage contribution and build on ideas"
                             )
                             aux["last_appreciation_sent"] = now
                             last_intervention_time = now
@@ -3190,24 +3265,69 @@ def send_message_handler(data):
             logger.warning(f"⚠️ Cannot send message - room {room_id} finished or not found")
             return
 
+        # Resolve any pending/active moderator intervention for this user or room
+        try:
+            from room_state import get_room_state
+            st = get_room_state(room_id)
+            pending = st.get("pending_interventions", [])
+            now_time = time.time()
+            
+            # Clean up expired pending interventions (>180s)
+            st["pending_interventions"] = [p for p in pending if now_time - p["timestamp"] <= 180]
+            
+            for p in list(st["pending_interventions"]):
+                if p["target"] == sender or p["target"] is None:
+                    latency = round(now_time - p["timestamp"], 2)
+                    try:
+                        supabase.table("moderator_interventions").update({
+                            "participant_response": msg,
+                            "latency_seconds": latency,
+                            "success": True
+                        }).eq("id", p["id"]).execute()
+                    except Exception as ex:
+                        logger.error(f"Failed to update success telemetry: {ex}")
+                    st["pending_interventions"].remove(p)
+                    break
+        except Exception as ex:
+            logger.error(f"Error resolving pending intervention: {ex}")
+
+        # Resolve language and participants for personal target checks
+        lang = get_room_primary_language(room_id)
+        all_parts = get_participants(room_id)
+        part_names = [p['username'] for p in all_parts if p['username'] != 'Moderator']
+
         is_inappropriate, bad_words = check_inappropriate_language(msg)
         if is_inappropriate:
-            severity = get_language_severity(bad_words)
+            severity = get_language_severity(bad_words, message=msg, participants=part_names)
             logger.warning(
                 f"⚠️ Inappropriate language from {sender}: {bad_words} (severity: {severity})"
             )
+            
+            # Reordered DB write to happen FIRST, preserving database chronology
+            saved_row = add_message(
+                room_id=room_id,
+                username=sender,
+                message=msg,
+                message_type="chat_flagged",
+                metadata={
+                    "word_count": word_count,
+                    "flagged": True,
+                    "bad_words": bad_words,
+                    "severity": severity,
+                    "flag_reason": "inappropriate language",
+                    **extra_meta,
+                },
+            )
+
             if severity == "HIGH":
-                high_severity_response = (
-                    "⚠️ Please keep our discussion respectful and professional. "
-                    "Focus on the ideas, not personal attacks. Let's continue with the ranking task."
-                )
+                high_severity_response = get_template_message("inappropriate_warning_socket", lang)
                 add_message(room_id, "Moderator", high_severity_response, "moderator")
                 socketio.emit(
                     "receive_message",
                     chat_socket_payload("Moderator", high_severity_response),
                     room=room_id,
                 )
-                log_moderator_intervention(room_id, "high_severity_warning", sender)
+                log_moderator_intervention(room_id, "high_severity_warning", sender, reason=f"Inappropriate language from {sender}: {bad_words}")
 
             if severity == "HIGH":
                 warning_msg = (
@@ -3244,22 +3364,7 @@ def send_message_handler(data):
                 )
                 logger.info(f"📨 Sent language warning to {sender} (severity={severity})")
 
-            log_moderator_intervention(room_id, "language_warning", sender)
-
-            saved_row = add_message(
-                room_id=room_id,
-                username=sender,
-                message=msg,
-                message_type="chat_flagged",
-                metadata={
-                    "word_count": word_count,
-                    "flagged": True,
-                    "bad_words": bad_words,
-                    "severity": severity,
-                    "flag_reason": "inappropriate language",
-                    **extra_meta,
-                },
-            )
+            log_moderator_intervention(room_id, "language_warning", sender, reason=f"Private warning to {sender} for {bad_words}")
 
             emit(
                 "receive_message",
@@ -3337,6 +3442,8 @@ def send_message_handler(data):
                     dominance_detected=None,
                     silent_user=None,
                     language=get_room_primary_language(room_id),
+                    room_id=room_id,
+                    intervention_type="answer_question"
                 )
                 rsp = (response or "").strip()
                 if len(rsp) > 8:
@@ -3346,25 +3453,36 @@ def send_message_handler(data):
                         chat_socket_payload("Moderator", rsp),
                         room=room_id,
                     )
-                    log_moderator_intervention(room_id, "active_at_mention", sender)
+                    log_moderator_intervention(
+                        room_id, "answer_question", sender,
+                        reason=f"Synchronous reply to @moderator mention from {sender}",
+                        research_question="RQ5",
+                        expected_effect="Respond to user query immediately"
+                    )
             except Exception as atmod_ex:
                 logger.error("Active @moderator inline reply failed: %s", atmod_ex)
 
         try:
             td = get_pinned_or_resolve_task_data(room_id)
             items = get_task_items(td)
-            clar = clarify_alias_against_list(msg, items)
-            if clar:
+            clar_item = clarify_alias_against_list(msg, items)
+            if clar_item:
                 nowc = time.time()
                 if nowc - last_item_clarification_at.get(room_id, 0) > 90:
                     last_item_clarification_at[room_id] = nowc
-                    add_message(room_id, "Moderator", clar, "moderator")
+                    clar_msg = get_template_message("item_clarification", lang, canon=clar_item)
+                    add_message(room_id, "Moderator", clar_msg, "moderator")
                     socketio.emit(
                         "receive_message",
-                        chat_socket_payload("Moderator", clar),
+                        chat_socket_payload("Moderator", clar_msg),
                         room=room_id,
                     )
-                    log_moderator_intervention(room_id, "item_clarification", sender)
+                    log_moderator_intervention(
+                        room_id, "item_clarification", sender,
+                        reason=f"Student used alias for item: {clar_item}",
+                        research_question="RQ4",
+                        expected_effect="Clarify official wording of survival item"
+                    )
         except Exception as clar_ex:
             logger.debug(f"Item clarification skipped: {clar_ex}")
 

@@ -952,21 +952,85 @@ _INTERPERSONAL_ATTACK_HIGH_PHRASES: frozenset[str] = frozenset(
 )
 
 
-def get_language_severity(bad_words: List[str]) -> str:
-    """HIGH / MEDIUM / LOW from matched terms (worst wins)."""
+def get_language_severity(bad_words: List[str], message: Optional[str] = None, participants: Optional[List[str]] = None) -> str:
+    """HIGH / MEDIUM / LOW from matched terms (worst wins), downgrading item criticism."""
     if not bad_words:
         return "LOW"
     blob = " ".join(bad_words).lower()
+    base_severity = "LOW"
     for p in sorted(_INTERPERSONAL_ATTACK_HIGH_PHRASES, key=len, reverse=True):
         if p in blob:
-            return "HIGH"
-    for w in sorted(_HIGH_SEVERITY_FRAGMENTS, key=len, reverse=True):
-        if w in blob:
-            return "HIGH"
-    for w in sorted(_MEDIUM_SEVERITY_FRAGMENTS, key=len, reverse=True):
-        if w in blob:
-            return "MEDIUM"
-    return "LOW"
+            base_severity = "HIGH"
+            break
+    if base_severity != "HIGH":
+        for w in sorted(_HIGH_SEVERITY_FRAGMENTS, key=len, reverse=True):
+            if w in blob:
+                base_severity = "HIGH"
+                break
+    if base_severity != "HIGH" and base_severity != "MEDIUM":
+        for w in sorted(_MEDIUM_SEVERITY_FRAGMENTS, key=len, reverse=True):
+            if w in blob:
+                base_severity = "MEDIUM"
+                break
+
+    # If base_severity is HIGH or MEDIUM, check if it's task disagreement vs personal attack
+    if base_severity in ("HIGH", "MEDIUM") and message:
+        msg_lower = message.lower()
+        personal_markers = ["you", "u", "your", "you're", "youre", "moderator"]
+        if participants:
+            for name in participants:
+                personal_markers.append(name.lower())
+                
+        has_personal_target = any(re.search(r"(?<!\w)" + re.escape(target) + r"(?!\w)", msg_lower) for target in personal_markers)
+        always_personal = ["shut up", "stfu", "gtfo", "fuck you", "f**k you", "shut the fuck up"]
+        is_always_personal = any(phrase in msg_lower for phrase in always_personal)
+        
+        if not has_personal_target and not is_always_personal:
+            # Downgrade to LOW because it's not directed at any person
+            logger.info("🛡️ Downgraded conflict severity to LOW: no personal target found in item/task criticism")
+            return "LOW"
+
+    return base_severity
+
+_LANG_TEMPLATES = {
+    "en": {
+        "time_warning_5m": "⚠️ **5 minutes remaining!** Please finalize your **complete ranking of all 12 items** from most important **(1)** to least important **(12)**.",
+        "time_warning_1m": "⏰ **Last minute!** Keep your **`1.` … `12.`** lines in chat clear—the server records the ranking automatically at the end.",
+        "turn_balance_streak_a": "{streak_user}, you've made several points—let's hear from {others} on the ranking too.",
+        "turn_balance_streak_b": "Thanks {streak_user}—{others}, what's your read on the next priorities?",
+        "drift_refocus": "Quick refocus: you need **one agreed order for all 12 desert items** (1 = most important). Which position is the group most uncertain about?",
+        "conflict_deescalation": "I'm hearing some friction—let's keep this respectful and collaborative. Can each of you offer **one** concrete change to your **12-item** ranking?",
+        "qa_fallback_default": "Your task is to rank the 12 desert survival items from most important (1) to least important (12). Discuss with your group and agree on a final ranking.",
+        "qa_fallback_time": "You have about {time_remaining} minutes remaining to complete the ranking task.",
+        "qa_fallback_item": "You need to rank the 12 items from most important (1) to least important (12) for desert survival. Discuss with your group and reach consensus.",
+        "inappropriate_warning_local": "{last_sender}, please keep our discussion professional and academic. Let's focus on the desert survival task.",
+        "inappropriate_warning_socket": "⚠️ Please keep our discussion respectful and professional. Focus on the ideas, not personal attacks. Let's continue with the ranking task.",
+        "item_clarification": "Quick note: on **our list** that item is: **{canon}**."
+    },
+    "roman_urdu": {
+        "time_warning_5m": "⚠️ **5 minutes baqi hain!** Baraye meharbani apne **sare 12 items ki mukammal ranking** sab se ahem **(1)** se sab se kam ahem **(12)** tak final karein.",
+        "time_warning_1m": "⏰ **Aakhri minute hai!** Chat mein apni **`1.` se `12.`** tak ki lines saaf rakhein—server aakhir mein ranking khud-ba-khud record kar leta hai.",
+        "turn_balance_streak_a": "{streak_user}, aap ne kaafi baat ki hai—chaliye ab ranking ke baare mein {others} se bhi sunte hain.",
+        "turn_balance_streak_b": "Shukriya {streak_user}—{others}, aap ke khayal mein aglay ahem items kaun se hain?",
+        "drift_refocus": "Ek jaldi refocus: aap logon ko **sare 12 desert items ki ek muttfiqa ranking** (1 = sab se ahem) banani hai. Kaun si position ke baare mein group sab se zyada uncertain hai?",
+        "conflict_deescalation": "Mujhe thodi bahas/friction lag rahi hai—is guftagu ko respectful aur collaborative rakhein. Kya aap mein se har koi apni **12-item** ranking mein **ek** thos tabdeeli tajweez kar sakta hai?",
+        "qa_fallback_default": "Aap ka kaam desert survival ke 12 items ko sab se ahem (1) se sab se kam ahem (12) tak rank karna hai. Apne group se discuss karein aur ek final ranking par ittifaq karein.",
+        "qa_fallback_time": "Aap ke paas ranking ka kaam poora karne ke liye lagbhag {time_remaining} minutes baqi hain.",
+        "qa_fallback_item": "Aap ko desert survival ke liye 12 items ko sab se ahem (1) se sab se kam ahem (12) tak rank karna hai. Apne group ke sath baat cheet karein aur consensus tak pohanchein.",
+        "inappropriate_warning_local": "{last_sender}, baraye meharbani guftagu ko professional aur respectful rakhein. Chaliye desert survival task par focus karte hain.",
+        "inappropriate_warning_socket": "⚠️ Baraye meharbani guftagu ko respectful aur professional rakhein. Khayalat par focus karein, zati attacks par nahi. Chaliye ranking task ko jaari rakhte hain.",
+        "item_clarification": "Ek choti si baat: **hamari list** mein wo item **{canon}** hai."
+    }
+}
+
+def get_template_message(template_name: str, language: Optional[str] = "en", **kwargs) -> str:
+    lang = (language or "en").strip().lower()
+    if lang not in ("roman_urdu", "mixed"):
+        lang = "en"
+    else:
+        lang = "roman_urdu"
+    tpl = _LANG_TEMPLATES[lang].get(template_name, _LANG_TEMPLATES["en"][template_name])
+    return tpl.format(**kwargs)
 
 # ============================================================
 # 🟢 ACTIVE MODERATOR PROMPTS (Research Version)
@@ -1136,14 +1200,14 @@ LANG_MIXED = "mixed"  # English + Roman Urdu in one message (common for PK stude
 _ROMAN_URDU_MARKERS: frozenset[str] = frozenset(
     {
         "hai", "hain", "nahi", "nahin", "nai", "kya", "kyun", "kyu", "kyunki",
-        "aap", "ap", "mujhe", "mujhay", "tum", "tumhe", "hum", "mera", "meri",
+        "aap", "mujhe", "mujhay", "tum", "tumhe", "mera", "meri",
         "tera", "teri", "unka", "kaise", "kaisa", "kahan", "kab", "acha",
         "accha", "achha", "theek", "thik", "bohot", "bahut", "bhai", "yaar",
         "haan", "kuch", "kuchh", "matlab", "samajh", "dekho", "suno", "chalo",
-        "raha", "rahe", "rahi", "karna", "karna", "karo", "krna", "kro", "kro",
+        "raha", "rahe", "rahi", "karna", "karo", "krna", "kro",
         "karein", "karenge", "lekin", "magar", "abhi", "phir", "zyada", "ziada",
-        "kam", "paani", "pani", "behtar", "wala", "wali", "kyunke", "mil", "rakho",
-        "sahi", "galat", "ghalat", "chahiye", "chahie", "hoga", "hogi", "hota",
+        "paani", "behtar", "wali", "kyunke", "rakho",
+        "galat", "ghalat", "chahiye", "chahie", "hoga", "hogi", "hota",
         "karte", "karta", "karti", "bana", "banao", "socho", "batao", "samjho",
     }
 )
@@ -1169,7 +1233,8 @@ def detect_language_from_messages(messages: List[Dict[str, Any]]) -> str:
 
     Each message is expected to have a "message" (or "text") field. Returns
     LANG_ROMAN_URDU when Roman Urdu messages are at least as common as English
-    ones, else LANG_EN. Empty input falls back to LANG_EN.
+    ones AND there are at least 2 Roman Urdu messages. Empty/low-volume input
+    falls back to LANG_EN.
     """
     urdu_count = 0
     en_count = 0
@@ -1183,7 +1248,7 @@ def detect_language_from_messages(messages: List[Dict[str, Any]]) -> str:
             en_count += 1
     if urdu_count == 0 and en_count == 0:
         return LANG_EN
-    return LANG_ROMAN_URDU if urdu_count >= en_count else LANG_EN
+    return LANG_ROMAN_URDU if (urdu_count >= 2 and urdu_count >= en_count) else LANG_EN
 
 
 # Arabic-script range (Urdu) — used to decide whether STT output needs processing.
@@ -1387,6 +1452,8 @@ def generate_active_moderator_response(
     dominance_detected: Optional[str] = None,
     silent_user: Optional[str] = None,
     language: Optional[str] = None,
+    room_id: Optional[str] = None,
+    intervention_type: Optional[str] = None,
 ) -> str:
     """Generate ACTIVE moderator response based on research rules.
 
@@ -1480,71 +1547,71 @@ def generate_active_moderator_response(
             "solid reasoning",
         )
         
-        # Determine intervention type
-        intervention_type = "normal"
-        
-        # First, check if the last message was a question that needs answering
-        if chat_history and len(chat_history) > 0:
-            last_msg = chat_history[-1]
-            if last_msg.get('sender') != 'Moderator':
-                last_content = last_msg.get('message', '').lower()
-                question_phrases = ['what we have to do', 'what to do', 'what next', 'what\'s next', 'whats next', 
-                                   'how to', 'what is the task', 'what should we', 'explain', 'how should i start',
-                                   'what do we do', 'help', 'confused', 'not sure']
-                
-                is_question = (
-                    "@moderator" in last_content
-                    or any(phrase in last_content for phrase in question_phrases)
-                    or '?' in last_content
-                )
-                logger.info(f"❓ Is last message a question? {is_question}")
-                
-                if is_question:
-                    intervention_type = "answer_question"
-                    logger.info(f"📝 Detected question, will answer")
-        
-        # If not a question, check other intervention types
-        if intervention_type == "normal":
-            if chat_history:
-                lm = chat_history[-1]
-                if lm.get("sender") != "Moderator":
-                    lc = lm.get("message", "").lower()
-                    if any(c in lc for c in appreciation_cues):
-                        intervention_type = "appreciate"
-                        logger.info("👏 Appreciation / build-on mode")
-                    elif len(lc) >= 40 and any(
-                        k in lc
-                        for k in (
-                            "because",
-                            "since",
-                            "rank",
-                            "important",
-                            "survival",
-                            "mirror",
-                            "water",
-                            "tarp",
-                            "sheet",
-                            "compass",
-                            "knife",
-                            "flashlight",
-                            "parachute",
-                        )
-                    ):
-                        intervention_type = "appreciate"
-                        logger.info("👏 Substantive item reasoning — appreciation mode")
-            # Caller only sets silent_user after a true 3+ min idle check (see check_silence).
-            if intervention_type == "normal" and silent_user:
-                intervention_type = "invite_silent"
-                logger.info(f"🤫 Will invite silent user: {silent_user}")
-            elif intervention_type == "normal" and dominance_detected:
-                intervention_type = "balance_dominance"
-                logger.info(f"👑 Will balance dominance for: {dominance_detected}")
-            elif intervention_type == "normal" and time_remaining <= 5:
-                intervention_type = "time_warning"
-                logger.info(f"⏰ Will give time warning")
-            elif intervention_type == "normal" and time_elapsed > 0 and time_elapsed % 5 == 0:
-                intervention_type = "summarize"
-                logger.info(f"📊 Will provide summary")
+        # Determine intervention type if not explicitly passed
+        if not intervention_type or intervention_type == "normal":
+            intervention_type = "normal"
+            
+            # First, check if the last message was a question that needs answering
+            if chat_history and len(chat_history) > 0:
+                last_msg = chat_history[-1]
+                if last_msg.get('sender') != 'Moderator':
+                    last_content = last_msg.get('message', '').lower()
+                    question_phrases = ['what we have to do', 'what to do', 'what next', 'what\'s next', 'whats next', 
+                                       'how to', 'what is the task', 'what should we', 'explain', 'how should i start',
+                                       'what do we do', 'help', 'confused', 'not sure']
+                    
+                    is_question = (
+                        "@moderator" in last_content
+                        or any(phrase in last_content for phrase in question_phrases)
+                        or '?' in last_content
+                    )
+                    logger.info(f"❓ Is last message a question? {is_question}")
+                    
+                    if is_question:
+                        intervention_type = "answer_question"
+                        logger.info(f"📝 Detected question, will answer")
+            
+            # If not a question, check other intervention types
+            if intervention_type == "normal":
+                if chat_history:
+                    lm = chat_history[-1]
+                    if lm.get("sender") != "Moderator":
+                        lc = lm.get("message", "").lower()
+                        if any(c in lc for c in appreciation_cues):
+                            intervention_type = "appreciate"
+                            logger.info("👏 Appreciation / build-on mode")
+                        elif len(lc) >= 40 and any(
+                            k in lc
+                            for k in (
+                                "because",
+                                "since",
+                                "rank",
+                                "important",
+                                "survival",
+                                "mirror",
+                                "water",
+                                "tarp",
+                                "sheet",
+                                "compass",
+                                "knife",
+                                "flashlight",
+                                "parachute",
+                            )
+                        ):
+                            intervention_type = "appreciate"
+                            logger.info("👏 Substantive item reasoning — appreciation mode")
+                if intervention_type == "normal" and silent_user:
+                    intervention_type = "invite_silent"
+                    logger.info(f"🤫 Will invite silent user: {silent_user}")
+                elif intervention_type == "normal" and dominance_detected:
+                    intervention_type = "balance_dominance"
+                    logger.info(f"👑 Will balance dominance for: {dominance_detected}")
+                elif intervention_type == "normal" and time_remaining <= 5:
+                    intervention_type = "time_warning"
+                    logger.info(f"⏰ Will give time warning")
+                elif intervention_type == "normal" and time_elapsed > 0 and time_elapsed % 5 == 0:
+                    intervention_type = "summarize"
+                    logger.info(f"📊 Will provide summary")
         
         logger.info(f"🎯 Final intervention type: {intervention_type}")
         
@@ -1562,12 +1629,18 @@ Answer in 1–2 short, conversational sentences. If it's about the task, say cle
 ONLY use these participant names: {participant_list_str}"""
         
         elif intervention_type == "invite_silent" and silent_user in actual_participants:
+            disputed_str = ""
+            if room_id:
+                from room_state import get_latest_disagreement
+                disagreed_rank, items_involved = get_latest_disagreement(room_id)
+                if disagreed_rank and items_involved:
+                    disputed_str = f" particularly concerning the dispute on Rank #{disagreed_rank} ({' vs '.join(items_involved)})"
             prompt = f"""Participants: {participant_list_str}
 
 Recent chat:
 {chat_excerpt}
 
-{silent_user} has been quiet. In **one warm sentence**, invite them by name to react to what others just said about specific items or priorities. Mention something concrete from the chat.
+{silent_user} has been quiet. In **one warm sentence**, invite them by name to react to what others just said{disputed_str}. Mention something concrete from the chat.
 ONLY use these participant names: {participant_list_str}"""
         
         elif intervention_type == "balance_dominance" and dominance_detected in actual_participants:
@@ -1590,12 +1663,45 @@ Only ~{time_remaining} minutes left. One encouraging sentence: they need **one a
 ONLY use these participant names: {participant_list_str}"""
         
         elif intervention_type == "summarize":
+            if room_id:
+                from room_state import format_progress_summary
+                progress_summary = format_progress_summary(room_id)
+            else:
+                progress_summary = "No progress available yet."
             prompt = f"""Participants: {participant_list_str}
+
+Structured Ranking Progress:
+{progress_summary}
 
 Recent chat:
 {chat_excerpt}
 
-Give a **brief** progress recap (1–2 sentences): what items or arguments have come up, and what’s still unsettled. Sound engaged, not robotic.
+Give a brief progress recap (1–2 sentences) based on the Structured Ranking Progress above. Recount what has been agreed, what is disputed, and what is left to discuss. Sound engaged and conversational.
+ONLY use these participant names: {participant_list_str}"""
+
+        elif intervention_type == "ranking_disagreement":
+            if room_id:
+                from room_state import get_latest_disagreement
+                disagreed_rank, items_involved = get_latest_disagreement(room_id)
+            else:
+                disagreed_rank, items_involved = "", []
+            if disagreed_rank and len(items_involved) >= 2:
+                prompt = f"""Participants: {participant_list_str}
+
+Recent chat:
+{chat_excerpt}
+
+There is currently a disagreement on Rank #{disagreed_rank} between: {", ".join(items_involved)}.
+One participant suggested {items_involved[1]} for Rank #{disagreed_rank} while {items_involved[0]} is leading.
+In one warm sentence, note this disagreement and ask the group to vote or reach consensus on this rank.
+ONLY use these participant names: {participant_list_str}"""
+            else:
+                prompt = f"""Participants: {participant_list_str}
+
+Recent chat:
+{chat_excerpt}
+
+Ask the group to check their next priority and reach consensus on the next ranks.
 ONLY use these participant names: {participant_list_str}"""
         
         elif intervention_type == "appreciate":

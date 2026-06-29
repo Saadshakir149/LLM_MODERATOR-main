@@ -526,5 +526,5 @@ def clarify_alias_against_list(message: str, canonical_items: List[str]) -> Opti
         canon = candidates[0]
         if canon.lower()[:12] in ml:
             return None
-        return f"Quick note: on **our list** that item is: **{canon}**."
+        return canon
     return None

@@ -26,8 +26,10 @@ import {
   MdStop,
   MdChat,
   MdGroup,
-  MdPsychology, // ✅ ADDED - for Active Mode icon
-  MdAutoMode  
+  MdPsychology,
+  MdAutoMode,
+  MdMenu,
+  MdClose
 } from 'react-icons/md';
 
 const API_URL = process.env.REACT_APP_API_URL || 'https://llm-moderator-main.onrender.com';
@@ -63,6 +65,7 @@ export default function AdminDashboard() {
   const [authError, setAuthError] = useState(null); // visible reason loads fail (e.g. 401)
   const [adminLogs, setAdminLogs] = useState([]);
   const [showCreateRoomModal, setShowCreateRoomModal] = useState(false);
+  const [isMenuOpen, setIsMenuOpen] = useState(false);
   const [newRoomData, setNewRoomData] = useState({
     mode: 'active',
     max_participants: 3,
@@ -461,10 +464,19 @@ export default function AdminDashboard() {
   return (
     <div className="min-h-screen bg-slate-50 font-body">
       {/* Modern Header */}
-      <header className="bg-white/80 backdrop-blur-md border-b border-slate-200 shadow-sm sticky top-0 z-30">
+      <header className="bg-white/80 backdrop-blur-md border-b border-slate-200 shadow-sm sticky top-0 z-50">
         <div className="px-6 py-4">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-3.5">
+              {/* Hamburger Toggle Button for Mobile Navigation */}
+              <button 
+                onClick={() => setIsMenuOpen(!isMenuOpen)}
+                className="block md:hidden p-1.5 rounded-lg text-slate-500 hover:bg-slate-100 hover:text-slate-800 focus:outline-none transition-colors"
+                aria-label="Toggle Navigation Menu"
+              >
+                {isMenuOpen ? <MdClose className="text-2xl" /> : <MdMenu className="text-2xl" />}
+              </button>
+
               <div className="w-10 h-10 rounded-xl bg-gradient-to-tr from-indigo-500 to-violet-650 flex items-center justify-center shadow-md shadow-indigo-100">
                 <MdSecurity className="text-xl text-white" />
               </div>
@@ -544,20 +556,31 @@ export default function AdminDashboard() {
         </div>
       )}
 
-      <div className="flex">
+      {/* Mobile Drawer Overlay Backdrop */}
+      {isMenuOpen && (
+        <div 
+          className="fixed inset-0 bg-slate-900/30 backdrop-blur-sm z-40 md:hidden"
+          onClick={() => setIsMenuOpen(false)}
+        />
+      )}
+
+      <div className="flex relative">
         {/* Modern Sidebar */}
-        <aside className="w-64 bg-white border-r border-gray-200 min-h-[calc(100vh-5rem)]">
+        <aside className={`w-64 bg-white border-r border-gray-200 min-h-[calc(100vh-5rem)] transition-all duration-300 z-45
+          fixed md:static left-0 top-20 bottom-0 md:translate-x-0
+          ${isMenuOpen ? 'translate-x-0 shadow-2xl' : '-translate-x-full md:translate-x-0'}
+        `}>
           <nav className="p-4 space-y-1">
             <NavItem 
               active={activeTab === 'dashboard'} 
-              onClick={() => setActiveTab('dashboard')}
+              onClick={() => { setActiveTab('dashboard'); setIsMenuOpen(false); }}
               icon={<MdDashboard />}
               label="Dashboard"
               badge=""
             />
             <NavItem 
               active={activeTab === 'rooms'} 
-              onClick={() => setActiveTab('rooms')}
+              onClick={() => { setActiveTab('rooms'); setIsMenuOpen(false); }}
               icon={<MdPeople />}
               label="Rooms"
               badge={rooms.length}
@@ -566,6 +589,7 @@ export default function AdminDashboard() {
               active={activeTab === 'links'} 
               onClick={() => {
                 setActiveTab('links');
+                setIsMenuOpen(false);
                 navigate('/shareable-links'); // ✅ NOW WORKS with useNavigate
               }} 
               icon={<MdLink />}
@@ -574,14 +598,14 @@ export default function AdminDashboard() {
             />
             <NavItem 
               active={activeTab === 'settings'} 
-              onClick={() => setActiveTab('settings')}
+              onClick={() => { setActiveTab('settings'); setIsMenuOpen(false); }}
               icon={<MdSettings />}
               label="Settings"
               badge=""
             />
             <NavItem 
               active={activeTab === 'logs'} 
-              onClick={() => setActiveTab('logs')}
+              onClick={() => { setActiveTab('logs'); setIsMenuOpen(false); }}
               icon={<MdHistory />}
               label="Admin Logs"
               badge={adminLogs.length}

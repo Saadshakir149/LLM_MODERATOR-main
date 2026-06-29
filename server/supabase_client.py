@@ -102,6 +102,13 @@ supabase: Client = create_client(
 )
 logger.info("✅ Supabase client initialized (custom timeouts)")
 
+# Run DB migrations to add new research tracking columns
+try:
+    from database_migrations import run_db_migrations
+    run_db_migrations()
+except Exception as _mig_ex:
+    logger.warning(f"Skipped database migrations: {_mig_ex}")
+
 # ============================================================
 # Voice Recording Storage (PRIVATE bucket; signed URLs only)
 # ============================================================
@@ -1624,19 +1631,91 @@ def log_moderator_intervention(room_id: str, intervention_type: str, target_user
                   {"intervention_type": intervention_type, "target_user": target_user})
     except Exception:
         pass
+# Map of intervention type to default RQ and expected effect
+INTERVENTION_RQ_MAP = {
+    "invite_silent": ("RQ1", "Increase participation of quiet member"),
+    "balance_dominance": ("RQ3", "Reduce speaking share of dominant member"),
+    "time_warning": ("RQ4", "Promote focus on final submission near deadline"),
+    "summarize": ("RQ4", "Synthesize current agreements and focus unassigned ranks"),
+    "appreciate": ("RQ1", "Encourage contribution and engagement"),
+    "conflict_resolution": ("RQ2", "De-escalate tension and prompt compromise"),
+    "high_severity_warning": ("RQ2", "Enforce professional discussion tone"),
+    "language_warning": ("RQ2", "Nudge respectful language privately"),
+    "answer_question": ("RQ5", "Respond to student query and maintain flow"),
+    "ranking_disagreement": ("RQ4", "Resolve item/rank preference conflicts")
+}
+
+def log_moderator_intervention(
+    room_id: str,
+    intervention_type: str,
+    target_user: Optional[str] = None,
+    reason: Optional[str] = None,
+    research_question: Optional[str] = None,
+    expected_effect: Optional[str] = None,
+    ranking_state_before: Optional[dict] = None,
+    ranking_state_after: Optional[dict] = None,
+) -> Optional[str]:
+    """Log moderator intervention for research analysis, with automatic telemetry mapping."""
     try:
+        from event_log import log_event
+        log_event(room_id, "intervention",
+                  {"intervention_type": intervention_type, "target_user": target_user})
+    except Exception:
+        pass
+    try:
+        from room_state import get_room_state
+        st = get_room_state(room_id)
+        
+        # Resolve RQ and Effect if not provided
+        if not research_question or not expected_effect:
+            default_rq, default_effect = INTERVENTION_RQ_MAP.get(intervention_type, ("RQ5", "Facilitate conversation flow"))
+            research_question = research_question or default_rq
+            expected_effect = expected_effect or default_effect
+
+        # Resolve ranking states if not provided
+        if not ranking_state_before:
+            ranking_state_before = st.get("ranking_state", {})
+        if not ranking_state_after:
+            ranking_state_after = st.get("ranking_state", {})
+
+        # Deep copy to avoid reference issues
+        import copy
+        ranking_state_before = copy.deepcopy(ranking_state_before)
+        ranking_state_after = copy.deepcopy(ranking_state_after)
+
         data = {
             "room_id": room_id,
             "intervention_type": intervention_type,
             "target_user": target_user,
-            "timestamp": datetime.now(timezone.utc).isoformat()
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "reason": reason or f"Triggered {intervention_type} for {target_user or 'group'}",
+            "research_question": research_question,
+            "expected_effect": expected_effect,
+            "ranking_state_before": ranking_state_before,
+            "ranking_state_after": ranking_state_after,
+            "success": False
         }
         
-        supabase.table("moderator_interventions").insert(data).execute()
-        logger.debug(f"📝 Logged intervention: {intervention_type} in room {room_id}")
+        res = supabase.table("moderator_interventions").insert(data).execute()
+        
+        inserted_id = None
+        if res.data:
+            inserted_id = res.data[0].get("id")
+            logger.debug(f"📝 Logged intervention: {intervention_type} in room {room_id} with ID {inserted_id}")
+            
+            # Register in pending list in room state
+            pending = st.setdefault("pending_interventions", [])
+            pending.append({
+                "id": str(inserted_id),
+                "target": target_user,
+                "timestamp": time.time()
+            })
+            
+        return inserted_id
         
     except Exception as e:
         logger.error(f"❌ Failed to log intervention: {e}")
+        return None
 
 def detect_conflict(message: str) -> tuple[bool, int]:
     """Detect if a message contains conflict and return severity"""
