@@ -1526,17 +1526,17 @@ export default function ChatRoom() {
       )}
 
       {/* 🎪 TOPBAR NAVIGATION */}
-      <div className="bg-white/90 backdrop-blur-md border-b border-slate-200/80 z-20 transition-all duration-300">
-        <div className="px-4 py-3 md:px-6 flex items-center justify-between">
+      <div className="bg-white/90 backdrop-blur-md border-b border-slate-200/80 z-30 transition-all duration-300">
+        <div className="px-4 py-3 md:px-6 flex flex-col md:flex-row md:items-center justify-between gap-3">
           <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-xl bg-gradient-to-tr from-indigo-500 to-violet-600 flex items-center justify-center text-white shadow-md shadow-indigo-100">
+            <div className="w-10 h-10 rounded-xl bg-gradient-to-tr from-indigo-500 to-violet-650 flex items-center justify-center text-white shadow-md shadow-indigo-100">
               <MdChat className="text-lg" />
             </div>
             <div>
               <h1 className="font-bold text-sm md:text-base text-slate-800 tracking-tight leading-tight">
                 Desert Survival Discussion
               </h1>
-              <div className="flex items-center gap-2 text-[11px] mt-0.5">
+              <div className="flex flex-wrap items-center gap-2 text-[11px] mt-0.5">
                 <span className="font-semibold text-slate-450 uppercase tracking-wider">Room:</span>
                 <button
                   onClick={() => {
@@ -1572,7 +1572,7 @@ export default function ChatRoom() {
             </div>
           </div>
           
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 overflow-x-auto whitespace-nowrap max-w-full pb-1 md:pb-0 scrollbar-none">
             <button
               onClick={() => setShowItemsPanel(!showItemsPanel)}
               className={`px-3 py-1.5 rounded-xl font-bold text-xs border transition-all flex items-center gap-1.5 ${
@@ -1658,9 +1658,20 @@ export default function ChatRoom() {
       {/* 📱 WORKSPACE WRAPPER */}
       <div className="flex flex-1 overflow-hidden relative">
         
+        {/* Drawer backdrop for mobile screens */}
+        {(showItemsPanel || showParticipants) && (
+          <div 
+            className="fixed inset-0 bg-slate-900/30 backdrop-blur-sm z-35 md:hidden"
+            onClick={() => {
+              setShowItemsPanel(false);
+              setShowParticipants(false);
+            }}
+          />
+        )}
+        
         {/* 🏜️ LEFT DRAWER: Desert items references */}
         <aside
-          className={`fixed md:static left-0 top-16 bottom-0 w-80 max-w-[85vw] bg-white border-r border-slate-200 shadow-xl md:shadow-none z-40 flex flex-col transition-all duration-300 ${
+          className={`fixed md:static left-0 top-0 md:top-16 bottom-0 w-80 max-w-[85vw] bg-white border-r border-slate-200 shadow-xl md:shadow-none z-45 flex flex-col transition-all duration-300 ${
             showItemsPanel ? "translate-x-0 opacity-100" : "-translate-x-full md:-ml-80 opacity-0"
           }`}
         >
@@ -1964,7 +1975,7 @@ export default function ChatRoom() {
 
         {/* 👥 RIGHT DRAWER: Room Participants */}
         {showParticipants && (
-          <aside className="fixed md:static right-0 top-16 bottom-0 w-80 max-w-[85vw] bg-white border-l border-slate-200 shadow-xl md:shadow-none z-40 flex flex-col animate-fade-in">
+          <aside className="fixed md:static right-0 top-0 md:top-16 bottom-0 w-80 max-w-[85vw] bg-white border-l border-slate-200 shadow-xl md:shadow-none z-45 flex flex-col animate-fade-in">
             <div className="p-4 border-b border-slate-100 bg-slate-50/50 flex items-center justify-between">
               <div>
                 <h3 className="font-bold text-slate-800 text-sm">Active Session Users</h3>
