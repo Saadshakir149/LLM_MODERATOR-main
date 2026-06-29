@@ -1176,6 +1176,8 @@ PAKISTANI ROMAN URDU (when the target language is Roman Urdu):
   natural and fine. Tone: warm, direct, brief.
 - Examples: "Acha ji, ab hum discussion shuru karte hain." /
   "Apni rai share karein." / "Sab log apni baat mukhtasir rakhein."
+
+{language_instruction}
 """
 
 # ------------------------------------------------------------
@@ -1225,6 +1227,46 @@ def roman_urdu_spoken_intro(n_items: int = 12) -> str:
         "hon, aur apni wajah mukhtasar batane ke liye tayyar rahein. Aap ke paas pandrah "
         "minute hain. Chaliye, baat cheet shuru karte hain!"
     )
+
+
+def enforce_english_translation(text: str) -> str:
+    """Translate common stray Roman Urdu/Hinglish words to English for English sessions."""
+    translations = {
+        "acha": "okay",
+        "accha": "okay",
+        "achha": "okay",
+        "hum": "we",
+        "yahan": "here",
+        "hai": "is",
+        "hain": "are",
+        "ka": "of",
+        "ki": "of",
+        "ke": "of",
+        "ko": "to",
+        "se": "from",
+        "mein": "in",
+        "tay": "decide",
+        "karne": "to do",
+        "ahem": "important",
+        "kam": "less",
+        "aap": "you",
+        "logon": "people",
+        "paas": "have",
+        "abhi": "right now",
+        "tum": "you",
+        "mera": "my",
+        "meri": "my",
+        "theek": "okay",
+        "thik": "okay",
+        "bhai": "friend",
+        "yaar": "friend",
+        "haan": "yes",
+    }
+    result = text
+    for word, replacement in translations.items():
+        pattern = re.compile(rf"\b{re.escape(word)}\b", re.IGNORECASE)
+        result = pattern.sub(lambda match: replacement if match.group().islower() else replacement.capitalize(), result)
+    return result
 
 
 # Concise behavioural guideline so interventions stay sharp (not repetitive / off-task).
@@ -1782,10 +1824,23 @@ ONLY use these participant names: {participant_list_str}"""
         logger.info(f"📝 Prompt created (type: {intervention_type})")
         logger.info(f"   Prompt preview: {prompt[:150]}...")
         
+        # Resolve language instruction
+        language_instruction = ""
+        if language:
+            lang_name = "Roman Urdu (Latin script only — NEVER use Arabic/Urdu Unicode characters)" if language in ("roman_urdu", "mixed") else "English"
+            language_instruction = (
+                f"\nCRITICAL LANGUAGE RULE:\n"
+                f"- You MUST respond ONLY in {lang_name}.\n"
+                f"- DO NOT use any other language or mix languages.\n"
+                f"- If the language is English: respond ONLY in standard English. DO NOT use any Roman Urdu words (such as 'Acha', 'hum', 'yahan', 'hai', 'hain', 'ka', 'ki', 'ke', 'ko', 'se', 'mein').\n"
+                f"- If the language is Roman Urdu: respond ONLY in Roman Urdu using Latin alphabet characters. DO NOT use English sentences."
+            )
+
         # Get system prompt with actual participants
         system_prompt = ACTIVE_MODERATOR_SYSTEM_PROMPT.format(
             participant_list=participant_list_str,
-            items=format_items_list()
+            items=format_items_list(),
+            language_instruction=language_instruction
         )
         logger.info(f"📝 System prompt created, length: {len(system_prompt)} chars")
         
@@ -1840,6 +1895,11 @@ ONLY use these participant names: {participant_list_str}"""
             text, _had_foreign, _scripts = sanitize_to_supported(text)
             if _had_foreign:
                 logger.warning("🛡️ Stripped foreign script from moderator output: %s", _scripts)
+            
+            # Post-generation validation & translation safety-net for English sessions
+            if language == "en":
+                text = enforce_english_translation(text)
+                
             logger.info(f"✅ Final response: {text[:150]}...")
             return text
         
@@ -1923,9 +1983,22 @@ The user just said (addressing you):
 Reply in 1–2 short sentences only. Answer exactly what they asked. No invitations, no summaries, no turn-balancing.
 If they ask about a specific list item, you may give one neutral, factual hint useful for discussion—do **not** announce an authoritative "correct" rank for the group."""
 
+        # Resolve language instruction
+        language_instruction = ""
+        if language:
+            lang_name = "Roman Urdu (Latin script only — NEVER use Arabic/Urdu Unicode characters)" if language in ("roman_urdu", "mixed") else "English"
+            language_instruction = (
+                f"\nCRITICAL LANGUAGE RULE:\n"
+                f"- You MUST respond ONLY in {lang_name}.\n"
+                f"- DO NOT use any other language or mix languages.\n"
+                f"- If the language is English: respond ONLY in standard English. DO NOT use any Roman Urdu words (such as 'Acha', 'hum', 'yahan', 'hai', 'hain', 'ka', 'ki', 'ke', 'ko', 'se', 'mein').\n"
+                f"- If the language is Roman Urdu: respond ONLY in Roman Urdu using Latin alphabet characters. DO NOT use English sentences."
+            )
+
         system = PASSIVE_MODERATOR_SYSTEM_PROMPT.format(
             participant_list=participant_list_str,
             items=format_items_list(),
+            language_instruction=language_instruction
         )
 
         if openai_client or groq_client:
@@ -1936,7 +2009,10 @@ If they ask about a specific list item, you may give one neutral, factual hint u
                 max_tokens=200,
             )
             if reply and len(reply.strip()) > 12:
-                return reply.strip()
+                text = reply.strip()
+                if language == "en":
+                    text = enforce_english_translation(text)
+                return text
 
         if "time" in last_msg_lower or "minute" in last_msg_lower:
             return f"You have about {time_remaining} minutes remaining."
