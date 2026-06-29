@@ -740,9 +740,7 @@ def _get_tts_provider(name: str):
 
 
 def synthesize_for_language(text: str, language: Optional[str]) -> bytes:
-    """Synthesize `text` choosing Uplift/OpenAI using the unified tts_manager.
-    Transliterates Roman Urdu to Urdu script for Uplift when appropriate.
-    """
+    """Synthesize `text` choosing Uplift/OpenAI using the unified tts_manager."""
     from tts.tts_manager import tts_manager
     from tts.language import detect_language
     from config import TTSConfig
@@ -752,17 +750,8 @@ def synthesize_for_language(text: str, language: Optional[str]) -> bytes:
     force_uplift = prefer_uplift and TTSConfig.FORCE_UPLIFT_FOR_URDU
     
     if prefer_uplift:
-        # Send Uplift URDU SCRIPT (it voices Arabic-script Urdu far more naturally than ambiguous Roman)
-        urdu_script_tts = os.getenv("URDU_SCRIPT_TTS", "true").strip().lower() in ("1", "true", "yes", "on")
-        uplift_text = text
-        if urdu_script_tts:
-            converted = roman_to_urdu_script(text)
-            if converted and converted != text:
-                uplift_text = converted
-                logger.info(f"[TTS] transliterated Roman→Urdu script for Uplift ({len(uplift_text)} chars)")
-        
         logger.info(f"[TTS] routing Urdu to tts_manager (lang={lang!r})")
-        audio = tts_manager.synthesize(uplift_text)
+        audio = tts_manager.synthesize(text)
         if audio:
             return audio
             

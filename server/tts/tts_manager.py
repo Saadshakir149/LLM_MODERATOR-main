@@ -36,6 +36,25 @@ class TTSManager:
         if not self.uplift and not self.openai:
             logger.error("❌ No TTS providers available!")
     
+    def _preprocess_urdu_text(self, text: str) -> str:
+        """Apply Pakistani vocabulary fixes and Roman->Urdu script transliteration."""
+        import os
+        try:
+            from prompts import enforce_pakistani_roman_urdu, roman_to_urdu_script
+            # 1. Apply vocabulary safety net (Hindi -> Pakistani Urdu)
+            text = enforce_pakistani_roman_urdu(text)
+            
+            # 2. Transliterate Roman Urdu -> Urdu script (Arabic characters)
+            urdu_script_tts = os.getenv("URDU_SCRIPT_TTS", "true").strip().lower() in ("1", "true", "yes", "on")
+            if urdu_script_tts:
+                converted = roman_to_urdu_script(text)
+                if converted and converted != text:
+                    logger.info(f"[TTS Manager] transliterated Roman→Urdu script ({len(converted)} chars)")
+                    text = converted
+        except Exception as e:
+            logger.warning(f"[TTS Manager] Preprocessing failed: {e}")
+        return text
+
     def synthesize(self, text: str, voice_id: Optional[str] = None,
                    output_format: Optional[str] = None) -> Optional[bytes]:
         """
@@ -46,6 +65,9 @@ class TTSManager:
         
         # For Urdu/Sindhi, prefer Uplift
         if language in ['ur', 'sd']:
+            if language == 'ur':
+                text = self._preprocess_urdu_text(text)
+                
             if self.uplift:
                 logger.info(f"🔊 Using Uplift for {language} text")
                 # Resolve proper voice ID from mapping
@@ -104,6 +126,9 @@ class TTSManager:
         # Get appropriate voice
         if not voice_id:
             voice_id = get_voice_for_language(language)
+            
+        if language == 'ur':
+            text = self._preprocess_urdu_text(text)
         
         # Try Uplift for Urdu/Sindhi
         if language in ['ur', 'sd'] and self.uplift:
