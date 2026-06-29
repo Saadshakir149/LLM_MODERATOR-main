@@ -56,37 +56,47 @@ class TTSManager:
         return text
 
     def synthesize(self, text: str, voice_id: Optional[str] = None,
-                   output_format: Optional[str] = None) -> Optional[bytes]:
+                   output_format: Optional[str] = None,
+                   language: Optional[str] = None) -> Optional[bytes]:
         """
         Synthesize speech with automatic provider selection.
         """
-        language = detect_language(text)
-        logger.info(f"📝 Detected language: {language}")
+        # Resolve and normalize language code
+        lang = language or detect_language(text)
+        lang = (lang or "").strip().lower()
+        if lang in ("roman_urdu", "urdu", "mixed", "ur"):
+            lang = "ur"
+        elif lang in ("sindhi", "sd"):
+            lang = "sd"
+        else:
+            lang = "en"
+            
+        logger.info(f"📝 Resolved TTS language: {lang}")
         
         # For Urdu/Sindhi, prefer Uplift
-        if language in ['ur', 'sd']:
-            if language == 'ur':
+        if lang in ['ur', 'sd']:
+            if lang == 'ur':
                 text = self._preprocess_urdu_text(text)
                 
             if self.uplift:
-                logger.info(f"🔊 Using Uplift for {language} text")
+                logger.info(f"🔊 Using Uplift for {lang} text")
                 # Resolve proper voice ID from mapping
-                vid = voice_id or get_voice_for_language(language)
+                vid = voice_id or get_voice_for_language(lang)
                 result = self.uplift.synthesize(text, vid, output_format)
                 if result:
                     return result
-                logger.warning(f"⚠️ Uplift failed for {language}, trying fallback")
+                logger.warning(f"⚠️ Uplift failed for {lang}, trying fallback")
             
             # Fallback to OpenAI if not forced
             if not TTSConfig.FORCE_UPLIFT_FOR_URDU and (self.openai or TTSConfig.OPENAI_API_KEY):
-                logger.info(f"🔊 Falling back to OpenAI for {language} text")
+                logger.info(f"🔊 Falling back to OpenAI for {lang} text")
                 return self._synthesize_openai(text)
             
             return None
         
         # For English, use configured provider
         if TTSConfig.TTS_PROVIDER == 'uplift' and self.uplift:
-            vid = voice_id or get_voice_for_language(language)
+            vid = voice_id or get_voice_for_language(lang)
             result = self.uplift.synthesize(text, vid, output_format)
             if result:
                 return result
@@ -117,34 +127,45 @@ class TTSManager:
         return None
     
     def synthesize_and_upload(self, text: str, room_id: str, message_id: str,
-                               voice_id: Optional[str] = None) -> Optional[str]:
+                               voice_id: Optional[str] = None,
+                               language: Optional[str] = None) -> Optional[str]:
         """
         Synthesize and upload to storage.
         """
-        language = detect_language(text)
+        # Resolve and normalize language code
+        lang = language or detect_language(text)
+        lang = (lang or "").strip().lower()
+        if lang in ("roman_urdu", "urdu", "mixed", "ur"):
+            lang = "ur"
+        elif lang in ("sindhi", "sd"):
+            lang = "sd"
+        else:
+            lang = "en"
+            
+        logger.info(f"📝 Resolved upload TTS language: {lang}")
         
         # Get appropriate voice
         if not voice_id:
-            voice_id = get_voice_for_language(language)
+            voice_id = get_voice_for_language(lang)
             
-        if language == 'ur':
+        if lang == 'ur':
             text = self._preprocess_urdu_text(text)
         
         # Try Uplift for Urdu/Sindhi
-        if language in ['ur', 'sd'] and self.uplift:
+        if lang in ['ur', 'sd'] and self.uplift:
             result = self.uplift.synthesize_and_upload(text, room_id, message_id, voice_id)
             if result:
                 return result
-            logger.warning(f"⚠️ Uplift upload failed for {language}, trying fallback")
+            logger.warning(f"⚠️ Uplift upload failed for {lang}, trying fallback")
         
         # Try English via configured provider (if uplift)
-        if language == 'en' and TTSConfig.TTS_PROVIDER == 'uplift' and self.uplift:
+        if lang == 'en' and TTSConfig.TTS_PROVIDER == 'uplift' and self.uplift:
             result = self.uplift.synthesize_and_upload(text, room_id, message_id, voice_id)
             if result:
                 return result
         
         # Try OpenAI fallback
-        if not (language in ['ur', 'sd'] and TTSConfig.FORCE_UPLIFT_FOR_URDU):
+        if not (lang in ['ur', 'sd'] and TTSConfig.FORCE_UPLIFT_FOR_URDU):
             audio_data = self._synthesize_openai(text)
             if audio_data:
                 from supabase_client import upload_audio_to_storage

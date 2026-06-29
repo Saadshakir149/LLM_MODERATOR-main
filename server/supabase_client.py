@@ -333,11 +333,21 @@ def persist_moderator_tts(
         
         # Detect language for logging
         language = detect_language(text)
-        logger.info(f"📝 Moderator TTS for {language} text")
+        
+        # Query room language to bypass auto-detection override
+        room_lang = None
+        try:
+            room_res = supabase.table("rooms").select("language").eq("id", room_id).execute()
+            if room_res.data:
+                room_lang = room_res.data[0].get("language")
+        except Exception as ree:
+            logger.debug(f"Could not fetch room language in persist_moderator_tts: {ree}")
+            
+        logger.info(f"📝 Moderator TTS for {language} text (room_lang={room_lang})")
         
         # Generate and upload
         storage_path = tts_manager.synthesize_and_upload(
-            text, room_id, message_id, voice_id
+            text, room_id, message_id, voice_id, language=room_lang
         )
         
         if not storage_path:

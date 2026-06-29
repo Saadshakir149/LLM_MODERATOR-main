@@ -48,8 +48,19 @@ def detect_language(text: str) -> str:
     
     # Check for Roman Urdu patterns (English script but Urdu words)
     tokens = re.findall(r"\b[a-zA-Z]+\b", text.lower())
-    for tok in tokens:
-        if tok in ROMAN_URDU_WORDS:
+    if tokens:
+        roman_urdu_count = sum(1 for tok in tokens if tok in ROMAN_URDU_WORDS)
+        english_indicators = {"the", "is", "are", "was", "were", "this", "that", "these", "those", "what", "how", "why", "when", "we", "need", "agree", "to", "you"}
+        english_count = sum(1 for tok in tokens if tok in english_indicators)
+        
+        # If English markers equal or outnumber Roman Urdu markers, resolve as English
+        if english_count > 0 and english_count >= roman_urdu_count:
+            return 'en'
+            
+        if roman_urdu_count > 0:
+            # Require at least 15% Roman Urdu density for longer sentences
+            if len(tokens) >= 5 and (roman_urdu_count / len(tokens)) < 0.15:
+                return 'en'
             return 'ur'
     
     # Default to English

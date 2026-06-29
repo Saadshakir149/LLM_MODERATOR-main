@@ -752,7 +752,7 @@ def synthesize_for_language(text: str, language: Optional[str]) -> bytes:
     
     if prefer_uplift:
         logger.info(f"[TTS] routing Urdu to tts_manager (lang={lang!r})")
-        audio = tts_manager.synthesize(text)
+        audio = tts_manager.synthesize(text, language=lang)
         if audio:
             return audio
             
@@ -764,7 +764,7 @@ def synthesize_for_language(text: str, language: Optional[str]) -> bytes:
         log_failure(None, "tts_provider_fallback", error="Uplift synthesis failed", recovery="used openai voice")
         
     # Standard English / fallback synthesis
-    audio = tts_manager.synthesize(text)
+    audio = tts_manager.synthesize(text, language=lang)
     if audio:
         return audio
         
@@ -3830,7 +3830,7 @@ def handle_end_session(data):
             # Pre-warm the TTS cache with the appropriate voice selection
             try:
                 from tts.tts_manager import tts_manager
-                tts_manager.synthesize(feedback)
+                tts_manager.synthesize(feedback, language=room_lang)
             except Exception as tts_err:
                 logger.debug(f"Feedback pre-warm TTS skipped: {tts_err}")
 
