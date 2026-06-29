@@ -3695,6 +3695,7 @@ def handle_end_session(data):
             logger.error(f"❌ Failed to save research metrics: {e}")
         
         # ===== 5. GENERATE PERSONALIZED FEEDBACK =====
+        room_lang = get_room_primary_language(room_id)
         chat_history_list = [
             {"sender": msg['username'], "message": msg['message']}
             for msg in full_chat_history
@@ -3791,6 +3792,7 @@ def handle_end_session(data):
                         story_context=task_context,
                         chat_sender_name=username,
                         all_participants_data=all_participants_data,
+                        language=room_lang,
                     )
                     if feedback and len(feedback.strip()) > 100:
                         logger.info(f"✅ Quality feedback for {username} (attempt {attempt + 1})")
@@ -3801,15 +3803,26 @@ def handle_end_session(data):
                     logger.error(f"❌ Feedback attempt {attempt + 1} for {username}: {e}")
                     if attempt == 2:
                         feedback = get_fallback_feedback(
-                            display_name, message_count, inappropriate_count
+                            display_name, message_count, inappropriate_count, language=room_lang
                         )
                     else:
                         time.sleep(1)
 
             if not feedback or len((feedback or "").strip()) <= 100:
                 feedback = get_fallback_feedback(
-                    display_name, message_count, inappropriate_count
+                    display_name, message_count, inappropriate_count, language=room_lang
                 )
+
+            # Apply vocabulary filter if the language is Roman Urdu
+            if room_lang in ("roman_urdu", "urdu", "mixed") and feedback:
+                feedback = enforce_pakistani_roman_urdu(feedback)
+                
+            # Pre-warm the TTS cache with the appropriate voice selection
+            try:
+                from tts.tts_manager import tts_manager
+                tts_manager.synthesize(feedback)
+            except Exception as tts_err:
+                logger.debug(f"Feedback pre-warm TTS skipped: {tts_err}")
 
             feedbacks[username] = feedback
             

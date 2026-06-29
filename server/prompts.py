@@ -1913,7 +1913,7 @@ def _normalize_feedback_markdown(text: str) -> str:
     return t.strip()
 
 
-def format_feedback_response(response: str, student_name: str) -> str:
+def format_feedback_response(response: str, student_name: str, language: str = "en") -> str:
     """Normalize LLM feedback for markdown UI (FeedbackPage uses ReactMarkdown)."""
     text = _normalize_feedback_markdown(response)
     if not text:
@@ -1923,14 +1923,19 @@ def format_feedback_response(response: str, student_name: str) -> str:
         return text
     if "your feedback" in low_start and "📊" in text[:80]:
         return text
+    if "aap ka feedback" in low_start and "📊" in text[:80]:
+        return text
+    
+    if language in ("roman_urdu", "urdu", "mixed"):
+        return f"## 📊 Aap ka Feedback\n\n{text}"
     return f"## 📊 Your Feedback\n\n{text}"
 
 
 def get_fallback_feedback(
-    student_name: str, message_count: int, toxic_count: int = 0
+    student_name: str, message_count: int, toxic_count: int = 0, language: str = "en"
 ) -> str:
     """Short alias for template feedback when the LLM is unavailable."""
-    return generate_detailed_fallback(student_name, message_count, [], toxic_count)
+    return generate_detailed_fallback(student_name, message_count, [], toxic_count, language)
 
 
 def generate_personalized_feedback(
@@ -1948,6 +1953,7 @@ def generate_personalized_feedback(
     all_participants_data: Optional[List[Dict[str, Any]]] = None,
     word_count: int = 0,
     share_of_talk: float = 0.0,
+    language: str = "en",
 ) -> str:
     """
     Generate personalized feedback via Groq/OpenAI when configured, with template fallback.
@@ -2097,10 +2103,36 @@ CONTENT:
 
 Return ONLY the markdown (no preamble, no markdown code fence)."""
 
+        if language in ("roman_urdu", "urdu", "mixed"):
+            system_prompt = """You are an expert educational facilitator. Write personalized, comparative feedback in ROMAN URDU (written in the Latin alphabet, e.g. "aap ne bohat achi participation ki") as valid Markdown.
+
+CRITICAL — LANGUAGE & RECIPIENT:
+- Write the entire feedback in natural Roman Urdu (Latin script only).
+- Do not use English text except for specific technical nouns (like messages, group, rank).
+- The user message identifies exactly one student (DISPLAY NAME + CHAT USERNAME). Write feedback ONLY for them.
+- Open with "Hi {their display name},"
+- Use SERVER-VERIFIED MESSAGES SENT, WORD COUNT, and SHARE exactly as given for that student — never copy another participant's counts.
+
+FORMATTING (required):
+- First line: ## 📊 Aap ka Feedback — then a blank line.
+- Greeting uses the STUDENT DISPLAY NAME from the context only.
+- Section labels on their own line, bold with a colon: **Participation ranking:** **Strengths:** **Areas for improvement:** **Next steps:**
+- After each section label, one blank line, then a markdown bullet list where every line starts with "- " (hyphen and space). Do not use • or * as bullet markers.
+- Use **only** pairs of double-asterisks for bold. Never output *** triple asterisks.
+- End with a short encouraging paragraph in Roman Urdu.
+
+CONTENT:
+- State how they ranked vs peers using the 👉 row and SERVER-VERIFIED stats (be kind if quietest).
+- Strengths: 2–3 bullets in Roman Urdu referencing THEIR recent messages when possible.
+- Improvements: 1–2 bullets in Roman Urdu; prioritize speaking up if quietest; if inappropriate-language count > 0, note professionalism briefly.
+- Next steps: 1–2 concrete actions in Roman Urdu.
+
+Return ONLY the markdown in Roman Urdu (no preamble, no markdown code fence)."""
+
         if not openai_client and not groq_client:
             logger.warning("⚠️ No LLM client for feedback; using template fallback")
             return get_fallback_feedback(
-                student_name, message_count, effective_toxic
+                student_name, message_count, effective_toxic, language
             )
 
         response = call_llm(
@@ -2111,10 +2143,10 @@ Return ONLY the markdown (no preamble, no markdown code fence)."""
         )
 
         if response and len(response.strip()) > 100:
-            return format_feedback_response(response, student_name)
+            return format_feedback_response(response, student_name, language)
 
         logger.warning("⚠️ LLM feedback missing or too short; using template fallback")
-        return get_fallback_feedback(student_name, message_count, effective_toxic)
+        return get_fallback_feedback(student_name, message_count, effective_toxic, language)
 
     except Exception as e:
         logger.error(f"❌ Error generating feedback: {e}")
@@ -2123,21 +2155,97 @@ Return ONLY the markdown (no preamble, no markdown code fence)."""
             student_name,
             message_count,
             max(toxic_count, 0),
+            language,
         )
 
-def generate_detailed_fallback(student_name: str, message_count: int, student_messages: List[str] = None, inappropriate_count: int = 0) -> str:
+
+def generate_detailed_fallback(student_name: str, message_count: int, student_messages: List[str] = None, inappropriate_count: int = 0, language: str = "en") -> str:
     """Fallback feedback when LLM is unavailable (markdown for FeedbackPage)."""
     student_messages = student_messages or []
     last_message = student_messages[-1][:100] + "..." if student_messages else "participating"
 
-    prof_bullet = (
-        "\n- Remember to keep language professional and academic"
-        if inappropriate_count > 0
-        else ""
-    )
+    is_urdu = language in ("roman_urdu", "urdu", "mixed")
 
-    if message_count == 0:
-        return f"""## 📊 Your Feedback
+    if is_urdu:
+        prof_bullet = (
+            "\n- Meharbani kar ke apni baat cheet ko professional aur ahem rakhein"
+            if inappropriate_count > 0
+            else ""
+        )
+
+        if message_count == 0:
+            return f"""## 📊 Aap ka Feedback
+
+Hi {student_name},
+
+Aaj ke session mein hissa lene ka bohat shukriya.
+
+**Strengths:**
+
+- Aap session mein maujood rahe aur active rahe
+
+**Areas for improvement:**
+
+- Agli baar guftagu mein apna ek chota khayal share karne ki koshish karein{prof_bullet}
+
+**Next steps:**
+
+- Agle session mein ek choti baat se shuru karein
+
+Shabaash!
+"""
+        if message_count <= 2:
+            return f"""## 📊 Aap ka Feedback
+
+Hi {student_name},
+
+Aap ke hissa lene ka bohat shukriya!
+
+**Strengths:**
+
+- Aap ne guftagu mein hissa lene ki koshish ki
+- Aap ka message "{last_message}" aap ki dilchaspi ko zahir karta hai
+
+**Areas for improvement:**
+
+- Apne khayalat ko mazeed wazahat se share karne ki koshish karein{prof_bullet}
+
+**Next steps:**
+
+- Agle session mein do ya teen baar bolne ki koshish karein
+
+Aise hi kaam karte rahein!
+"""
+        return f"""## 📊 Aap ka Feedback
+
+Hi {student_name},
+
+Aap ki behtareen participation ka bohat shukriya!
+
+**Strengths:**
+
+- Aap ne har mauqa par team ke saath collaborate kiya
+- Aap ka message "{last_message}" creative thinking ko zahir karta hai
+
+**Areas for improvement:**
+
+- Apne khayalat ko doosron ke khayalat se jodne ki koshish karein{prof_bullet}
+
+**Next steps:**
+
+- Agli guftagu mein baqi doston ke points par apna opinion dein
+
+Bohat khoob!
+"""
+    else:
+        prof_bullet = (
+            "\n- Remember to keep language professional and academic"
+            if inappropriate_count > 0
+            else ""
+        )
+
+        if message_count == 0:
+            return f"""## 📊 Your Feedback
 
 Hi {student_name},
 
@@ -2157,8 +2265,8 @@ Thank you for being part of our session today.
 
 I look forward to hearing from you!
 """
-    if message_count <= 2:
-        return f"""## 📊 Your Feedback
+        if message_count <= 2:
+            return f"""## 📊 Your Feedback
 
 Hi {student_name},
 
@@ -2179,7 +2287,7 @@ Thank you for your contributions!
 
 Keep up the good work!
 """
-    return f"""## 📊 Your Feedback
+        return f"""## 📊 Your Feedback
 
 Hi {student_name},
 
