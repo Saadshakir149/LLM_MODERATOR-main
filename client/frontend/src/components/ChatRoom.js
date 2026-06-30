@@ -1686,7 +1686,7 @@ export default function ChatRoom() {
         {/* Drawer backdrop for mobile screens */}
         {(showItemsPanel || showParticipants) && (
           <div 
-            className="fixed inset-0 bg-slate-900/30 backdrop-blur-sm z-35 md:hidden"
+            className="fixed inset-0 bg-slate-900/30 backdrop-blur-sm z-40 md:hidden"
             onClick={() => {
               setShowItemsPanel(false);
               setShowParticipants(false);
@@ -1697,7 +1697,7 @@ export default function ChatRoom() {
         {/* 🏜️ LEFT DRAWER: Desert items references */}
         <aside
           style={{ backgroundColor: '#ffffff' }}
-          className={`fixed md:static left-0 top-0 md:top-16 bottom-0 w-80 max-w-[85vw] bg-white border-r border-slate-200 shadow-xl md:shadow-none z-45 flex flex-col transition-all duration-300 ${
+          className={`fixed md:static left-0 top-0 md:top-16 bottom-0 w-80 max-w-[85vw] bg-white border-r border-slate-200 shadow-xl md:shadow-none z-50 flex flex-col transition-all duration-300 ${
             showItemsPanel ? "translate-x-0 opacity-100" : "-translate-x-full md:-ml-80 opacity-0"
           }`}
         >
@@ -2003,7 +2003,7 @@ export default function ChatRoom() {
         {showParticipants && (
           <aside
             style={{ backgroundColor: '#ffffff' }}
-            className="fixed md:static right-0 top-0 md:top-16 bottom-0 w-80 max-w-[85vw] bg-white border-l border-slate-200 shadow-xl md:shadow-none z-45 flex flex-col animate-fade-in"
+            className="fixed md:static right-0 top-0 md:top-16 bottom-0 w-80 max-w-[85vw] bg-white border-l border-slate-200 shadow-xl md:shadow-none z-50 flex flex-col animate-fade-in"
           >
             <div className="p-4 border-b border-slate-100 bg-slate-50/50 flex items-center justify-between">
               <div>
