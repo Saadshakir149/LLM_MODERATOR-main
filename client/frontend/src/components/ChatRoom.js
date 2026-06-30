@@ -8,6 +8,8 @@ import remarkGfm from "remark-gfm";
 import remarkBreaks from "remark-breaks";
 import rehypeSanitize from "rehype-sanitize";
 import { socket, API_BASE } from "../socket"; // ✅ FIXED: Import API_BASE from socket.js
+import MessageAudio from "./MessageAudio";
+import audioManager from "../utils/AudioManager";
 import {
   MdExitToApp,
   MdContentCopy,
@@ -283,22 +285,9 @@ function ChatMessageBody({ msg, isCurrentUser, onPlayVoice, onSpeak }) {
     const transcript = romanizeUrdu(meta.roman_transcript || msg.message || "");
     const hasAudio = msg.id != null && !String(msg.id).includes("_");
     const accent = isCurrentUser ? "text-indigo-100" : "text-purple-700";
+    const audioUrl = `${API_BASE}/api/message/${msg.id}/audio`;
     return (
-      <div className="flex items-start gap-2">
-        {hasAudio && (
-          <button
-            type="button"
-            onClick={() => onPlayVoice && onPlayVoice(String(msg.id))}
-            title="Play original recording"
-            className={`flex-shrink-0 mt-0.5 w-7 h-7 rounded-full flex items-center justify-center transition-colors ${
-              isCurrentUser
-                ? "bg-white/20 hover:bg-white/30 text-white"
-                : "bg-purple-100 hover:bg-purple-200 text-purple-700"
-            }`}
-          >
-            ▶
-          </button>
-        )}
+      <div className="flex flex-col gap-2 text-left">
         <div className="min-w-0">
           <span
             className={`inline-flex items-center gap-1 text-[10px] font-bold uppercase tracking-wide mb-0.5 ${accent}`}
@@ -307,6 +296,12 @@ function ChatMessageBody({ msg, isCurrentUser, onPlayVoice, onSpeak }) {
           </span>
           <p className="whitespace-pre-wrap break-words text-sm italic">{transcript}</p>
         </div>
+        {hasAudio && (
+          <MessageAudio
+            audioUrl={audioUrl}
+            messageId={String(msg.id)}
+          />
+        )}
       </div>
     );
   }
@@ -921,6 +916,7 @@ export default function ChatRoom() {
         setPlayback({ progress: d ? Math.min(1, ct / d) : 0, elapsed: ct, duration: d });
       };
       console.log(`[AUDIO] play() called key=${item.key} unlocked=${audioUnlockedRef.current}`);
+      try { audioManager.stop(); } catch (_) {}
       await el.play();
       console.log(`[AUDIO] play() resolved — audio started key=${item.key}`);
       // Pipeline: now that this clip is playing, warm the NEXT queued clip (one only,
@@ -1014,6 +1010,7 @@ export default function ChatRoom() {
     const el = audioElRef.current;
     if (!el) return;
     if (el.paused) {
+      try { audioManager.stop(); } catch (_) {}
       el.play().then(() => setVoicePaused(false)).catch(() => {});
     } else {
       el.pause();
@@ -1050,6 +1047,17 @@ export default function ChatRoom() {
 
   // Stop audio + free blob URLs on unmount
   useEffect(() => stopAndClearVoice, [stopAndClearVoice]);
+
+  // Pause/stop moderator audio when a user voice message is played
+  useEffect(() => {
+    const handleOtherAudioPlay = () => {
+      stopAndClearVoice();
+    };
+    audioManager.registerOnPlayCallback(handleOtherAudioPlay);
+    return () => {
+      audioManager.unregisterOnPlayCallback(handleOtherAudioPlay);
+    };
+  }, [stopAndClearVoice]);
 
   // Revoke every cached TTS blob URL on unmount (the cache, not playback, owns them now).
   useEffect(() => {
