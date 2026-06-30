@@ -1696,6 +1696,7 @@ export default function ChatRoom() {
         
         {/* 🏜️ LEFT DRAWER: Desert items references */}
         <aside
+          style={{ backgroundColor: '#ffffff' }}
           className={`fixed md:static left-0 top-0 md:top-16 bottom-0 w-80 max-w-[85vw] bg-white border-r border-slate-200 shadow-xl md:shadow-none z-45 flex flex-col transition-all duration-300 ${
             showItemsPanel ? "translate-x-0 opacity-100" : "-translate-x-full md:-ml-80 opacity-0"
           }`}
@@ -2000,7 +2001,10 @@ export default function ChatRoom() {
 
         {/* 👥 RIGHT DRAWER: Room Participants */}
         {showParticipants && (
-          <aside className="fixed md:static right-0 top-0 md:top-16 bottom-0 w-80 max-w-[85vw] bg-white border-l border-slate-200 shadow-xl md:shadow-none z-45 flex flex-col animate-fade-in">
+          <aside
+            style={{ backgroundColor: '#ffffff' }}
+            className="fixed md:static right-0 top-0 md:top-16 bottom-0 w-80 max-w-[85vw] bg-white border-l border-slate-200 shadow-xl md:shadow-none z-45 flex flex-col animate-fade-in"
+          >
             <div className="p-4 border-b border-slate-100 bg-slate-50/50 flex items-center justify-between">
               <div>
                 <h3 className="font-bold text-slate-800 text-sm">Active Session Users</h3>

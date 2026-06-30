@@ -370,3 +370,8 @@
     0% { transform: scaleY(0.3); height: 6px; }
     100% { transform: scaleY(1); height: 20px; }
 }
+
+/* Force solid opaque backgrounds for mobile drawers to prevent text overlapping */
+aside {
+    background-color: #ffffff !important;
+}
