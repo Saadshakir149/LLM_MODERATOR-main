@@ -533,7 +533,7 @@ export default function ChatRoom() {
   const [languageWarning, setLanguageWarning] = useState(null);
   const languageWarningTimerRef = useRef(null);
   const processedIdsRef = useRef(new Set());
-  const [showItemsPanel, setShowItemsPanel] = useState(true);
+  const [showItemsPanel, setShowItemsPanel] = useState(() => window.innerWidth > 768);
   const [desertItems, setDesertItems] = useState(() => [...DESERT_ITEMS]);
 
   const messagesEndRef = useRef(null);
@@ -574,6 +574,23 @@ export default function ChatRoom() {
       cancelled = true;
     };
   }, [roomId]);
+
+  // Handle responsive panel visibility on screen resize
+  useEffect(() => {
+    const handleResize = () => {
+      const isMobile = window.innerWidth <= 768;
+      if (isMobile) {
+        setShowItemsPanel(false);
+        setShowParticipants(false);
+      } else {
+        setShowItemsPanel(true);
+      }
+    };
+    window.addEventListener("resize", handleResize);
+    // Note: we don't call handleResize() immediately here to avoid overwriting user
+    // toggle interactions on mount, since the initial state function already handles it.
+    return () => window.removeEventListener("resize", handleResize);
+  }, []);
 
   const dismissLanguageWarning = useCallback(() => {
     if (languageWarningTimerRef.current) {
