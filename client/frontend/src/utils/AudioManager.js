@@ -1,13 +1,15 @@
 /**
  * AudioManager - Singleton for global audio control
- * Ensures only one audio plays at a time, like WhatsApp
+ * Ensures only ONE audio plays at a time
  */
 class AudioManager {
     constructor() {
         this.currentAudio = null;
         this.currentMessageId = null;
-        this.listeners = new Map();
         this.isPlaying = false;
+        this.listeners = new Map();
+        this.onPlayCallbacks = [];
+        console.log('🎵 AudioManager initialized');
     }
 
     /**
@@ -17,6 +19,8 @@ class AudioManager {
      * @returns {HTMLAudioElement} The audio element
      */
     play(audioUrl, messageId) {
+        console.log(`▶️ Playing: ${messageId}`);
+        
         // Stop any currently playing audio
         this.stop();
 
@@ -31,15 +35,18 @@ class AudioManager {
         this.isPlaying = true;
 
         // Notify listeners
-        this.notifyListeners(messageId, 'play');
+        this._notifyListeners(messageId, 'play');
+        this._notifyPlayCallbacks(audioUrl, messageId);
 
         // Auto-cleanup on end
         audio.onended = () => {
+            console.log(`⏹️ Audio ended: ${messageId}`);
             this.stop();
         };
 
         // Cleanup on error
-        audio.onerror = () => {
+        audio.onerror = (err) => {
+            console.error(`❌ Audio error: ${messageId}`, err);
             this.stop();
         };
 
@@ -51,13 +58,14 @@ class AudioManager {
      */
     stop() {
         if (this.currentAudio) {
+            console.log(`⏹️ Stopping: ${this.currentMessageId}`);
             this.currentAudio.pause();
             this.currentAudio.currentTime = 0;
             const oldId = this.currentMessageId;
             this.currentAudio = null;
             this.currentMessageId = null;
             this.isPlaying = false;
-            this.notifyListeners(oldId, 'stop');
+            this._notifyListeners(oldId, 'stop');
         }
     }
 
@@ -69,15 +77,35 @@ class AudioManager {
             if (this.currentAudio.paused) {
                 this.currentAudio.play();
                 this.isPlaying = true;
-                this.notifyListeners(messageId, 'play');
+                this._notifyListeners(messageId, 'play');
             } else {
                 this.currentAudio.pause();
                 this.isPlaying = false;
-                this.notifyListeners(messageId, 'pause');
+                this._notifyListeners(messageId, 'pause');
             }
         } else {
             this.play(audioUrl, messageId);
         }
+    }
+
+    /**
+     * Register callback for when ANY audio starts
+     */
+    registerOnPlayCallback(callback) {
+        if (typeof callback === 'function') {
+            this.onPlayCallbacks.push(callback);
+            console.log('✅ Play callback registered, total:', this.onPlayCallbacks.length);
+        } else {
+            console.warn('⚠️ registerOnPlayCallback: Not a function');
+        }
+    }
+
+    /**
+     * Unregister play callback
+     */
+    unregisterOnPlayCallback(callback) {
+        this.onPlayCallbacks = this.onPlayCallbacks.filter(cb => cb !== callback);
+        console.log('❌ Play callback unregistered, remaining:', this.onPlayCallbacks.length);
     }
 
     /**
@@ -111,7 +139,7 @@ class AudioManager {
     }
 
     /**
-     * Add listener for audio events
+     * Add listener for specific audio
      */
     addListener(messageId, callback) {
         if (!this.listeners.has(messageId)) {
@@ -134,12 +162,32 @@ class AudioManager {
     /**
      * Notify all listeners of an event
      */
-    notifyListeners(messageId, event) {
+    _notifyListeners(messageId, event) {
         const callbacks = this.listeners.get(messageId) || [];
-        callbacks.forEach(cb => cb(event));
+        callbacks.forEach(cb => {
+            try {
+                cb(event);
+            } catch (err) {
+                console.error('❌ Listener error:', err);
+            }
+        });
+    }
+
+    /**
+     * Notify play callbacks when ANY audio starts playing
+     */
+    _notifyPlayCallbacks(audioUrl, messageId) {
+        console.log(`📢 Notifying ${this.onPlayCallbacks.length} play callbacks`);
+        this.onPlayCallbacks.forEach(cb => {
+            try {
+                cb(audioUrl, messageId);
+            } catch (err) {
+                console.error('❌ Play callback error:', err);
+            }
+        });
     }
 }
 
-// Export singleton instance
+// Create and export singleton instance
 const audioManager = new AudioManager();
 export default audioManager;
