@@ -546,6 +546,61 @@ def chat_socket_payload(sender: str, message: str, **extra: Any) -> dict:
     return payload
 
 
+def send_moderator_message(
+    room_id: str,
+    text: str,
+    msg_type: str = "moderator",
+    metadata: Optional[Dict[str, Any]] = None
+) -> Dict[str, Any]:
+    """
+    Unified helper to record, synthesize TTS audio, and emit a moderator message.
+    1. Saves message to DB via add_message.
+    2. Synthesizes & persists TTS audio using persist_moderator_tts (skipping if < 20 chars).
+    3. Emits receive_message payload and moderator_audio event for active voice playback.
+    """
+    clean_text = (text or "").strip()
+    if not clean_text:
+        return {}
+
+    # Save message row
+    saved_msg = add_message(room_id, "Moderator", clean_text, msg_type)
+    msg_id = saved_msg.get("id") if isinstance(saved_msg, dict) else None
+
+    # Synthesize & persist TTS for messages >= 20 characters
+    audio_record = None
+    if clean_text and len(clean_text) >= 20 and msg_id:
+        try:
+            from supabase_client import persist_moderator_tts
+            audio_record = persist_moderator_tts(room_id, str(msg_id), clean_text)
+            if audio_record:
+                logger.info(f"🔊 Synthesized & persisted moderator TTS for msg_id={msg_id} ({len(clean_text)} chars)")
+        except Exception as tts_err:
+            logger.warning(f"⚠️ Moderator TTS generation failed: {tts_err}")
+
+    # Build socket payload
+    extra = metadata or {}
+    if audio_record:
+        extra["audio_url"] = audio_record.get("audio_url")
+        extra["storage_path"] = audio_record.get("storage_path")
+
+    payload = chat_socket_payload("Moderator", clean_text, **extra)
+    if msg_id:
+        payload["id"] = msg_id
+
+    socketio.emit("receive_message", payload, room=room_id)
+
+    # Emit explicit moderator_audio event for active voice playback client hooks
+    if audio_record and audio_record.get("audio_url"):
+        socketio.emit("moderator_audio", {
+            "room_id": room_id,
+            "message_id": msg_id,
+            "audio_url": audio_record.get("audio_url"),
+            "text": clean_text
+        }, room=room_id)
+
+    return payload
+
+
 # Rolling per-room language state, updated gradually from STUDENT messages so the
 # moderator/TTS don't flip language on a single noisy message. "mixed" counts toward
 # Roman Urdu for voice routing (Pakistani code-switching reads better in the Urdu voice).
@@ -1794,12 +1849,7 @@ def start_active_moderator(room_id: str):
                     if others:
                         streak_tpl = random.choice(["turn_balance_streak_a", "turn_balance_streak_b"])
                         force_response = get_template_message(streak_tpl, lang, streak_user=streak_user, others=others[0])
-                        add_message(room_id, "Moderator", force_response, "moderator")
-                        socketio.emit(
-                            "receive_message",
-                            chat_socket_payload("Moderator", force_response),
-                            room=room_id,
-                        )
+                        send_moderator_message(room_id, force_response, "moderator")
                         log_moderator_intervention(
                             room_id, "force_turn_balance", streak_user,
                             reason=f"{streak_user} message streak >= 3",
@@ -4182,19 +4232,46 @@ def stt():
         lang_hint = (request.form.get("language") or "").strip().lower()
         stt_lang = {"ur": "ur", "urdu": "ur", "roman_urdu": "ur", "en": "en", "english": "en"}.get(lang_hint)
 
+        # Optional VAD & Denoise Preprocessing
+        try:
+            from audio_preprocessor import process_audio_for_stt
+            cleaned_bytes, has_voice = process_audio_for_stt(data_bytes)
+            if not has_voice:
+                logger.info("🎤 VAD: Audio contains no audible speech / silence.")
+        except Exception as vad_err:
+            logger.debug(f"VAD preprocessing skipped: {vad_err}")
+
         _t_stt = time.time()
-        if openai_client is not None:
-            stt_kwargs = {"model": "gpt-4o-mini-transcribe", "file": buf}
-            if stt_lang:
-                stt_kwargs["language"] = stt_lang
-            res = openai_client.audio.transcriptions.create(**stt_kwargs)
-        else:
-            logger.info("🎤 OPENAI_API_KEY missing. Routing STT through Groq Whisper-large-v3...")
-            stt_kwargs = {"model": "whisper-large-v3", "file": buf}
-            if stt_lang:
-                stt_kwargs["language"] = stt_lang
-            res = groq_client.audio.transcriptions.create(**stt_kwargs)
-            
+        res = None
+        # Task 1: Primary STT using Groq Whisper (whisper-large-v3)
+        if groq_client is not None:
+            try:
+                logger.info("🎤 STT: Attempting Groq Whisper (whisper-large-v3)...")
+                stt_kwargs = {"model": "whisper-large-v3", "file": buf}
+                if stt_lang:
+                    stt_kwargs["language"] = stt_lang
+                res = groq_client.audio.transcriptions.create(**stt_kwargs)
+                logger.info("✅ Groq Whisper STT successful!")
+            except Exception as groq_stt_err:
+                logger.warning(f"⚠️ Groq Whisper STT failed: {groq_stt_err}. Retrying with OpenAI...")
+                res = None
+
+        # Fallback to OpenAI if Groq was unavailable or failed
+        if res is None and openai_client is not None:
+            try:
+                logger.info("🎤 STT Fallback: Attempting OpenAI transcription...")
+                stt_kwargs = {"model": "gpt-4o-mini-transcribe", "file": buf}
+                if stt_lang:
+                    stt_kwargs["language"] = stt_lang
+                res = openai_client.audio.transcriptions.create(**stt_kwargs)
+                logger.info("✅ OpenAI STT fallback successful!")
+            except Exception as openai_stt_err:
+                logger.error(f"❌ OpenAI STT fallback also failed: {openai_stt_err}")
+                res = None
+
+        if res is None:
+            return jsonify({"error": "STT transcription failed on all available providers"}), 502
+
         _stt_ms = int((time.time() - _t_stt) * 1000)
         raw_text = (res.text or "").strip()
 
