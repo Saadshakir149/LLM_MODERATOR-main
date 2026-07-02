@@ -4151,8 +4151,8 @@ def stt():
     _t_req = time.time()
     logger.info("🎤 STT request")
 
-    if openai_client is None:
-        return jsonify({"error": "STT unavailable: OPENAI_API_KEY not configured"}), 503
+    if openai_client is None and groq_client is None:
+        return jsonify({"error": "STT unavailable: Neither OpenAI nor Groq API keys configured"}), 503
 
     if "file" not in request.files:
         return jsonify({"error": "No audio file provided (expected form field 'file')"}), 400
@@ -4162,11 +4162,6 @@ def stt():
         data_bytes = f.read()
         content_type = f.mimetype or "audio/webm"
 
-        # Stage the raw audio in the BACKGROUND, concurrently with transcription.
-        # The ~3s Supabase upload thus overlaps the ~6-8s OpenAI call instead of
-        # being added on after it. The token is known up front and the upload
-        # finishes long before the SEND-time finalize move. Staging never blocks
-        # the transcript. It is MOVED to {room_id}/{message_id}.webm at send time.
         audio_token = uuid.uuid4().hex
 
         def _stage_audio():
@@ -4182,19 +4177,25 @@ def stt():
         staging_thread.start()
 
         buf = BytesIO(data_bytes)
-        buf.name = "recording.webm"  # OpenAI infers the container from the extension
+        buf.name = "recording.webm"
 
-        # Explicit language hint (en | ur) from the room's choice — stops the model
-        # auto-detecting into a stray language/script (Korean/Chinese/etc.). Roman Urdu
-        # rooms hint "ur" (Urdu); the result is romanized downstream by classify_and_normalize.
-        stt_kwargs = {"model": "gpt-4o-mini-transcribe", "file": buf}
         lang_hint = (request.form.get("language") or "").strip().lower()
         stt_lang = {"ur": "ur", "urdu": "ur", "roman_urdu": "ur", "en": "en", "english": "en"}.get(lang_hint)
-        if stt_lang:
-            stt_kwargs["language"] = stt_lang
-        _t_openai = time.time()
-        res = openai_client.audio.transcriptions.create(**stt_kwargs)
-        _stt_ms = int((time.time() - _t_openai) * 1000)
+
+        _t_stt = time.time()
+        if openai_client is not None:
+            stt_kwargs = {"model": "gpt-4o-mini-transcribe", "file": buf}
+            if stt_lang:
+                stt_kwargs["language"] = stt_lang
+            res = openai_client.audio.transcriptions.create(**stt_kwargs)
+        else:
+            logger.info("🎤 OPENAI_API_KEY missing. Routing STT through Groq Whisper-large-v3...")
+            stt_kwargs = {"model": "whisper-large-v3", "file": buf}
+            if stt_lang:
+                stt_kwargs["language"] = stt_lang
+            res = groq_client.audio.transcriptions.create(**stt_kwargs)
+            
+        _stt_ms = int((time.time() - _t_stt) * 1000)
         raw_text = (res.text or "").strip()
 
         # ONE structured LLM call returns {language, confidence, normalized_text}.

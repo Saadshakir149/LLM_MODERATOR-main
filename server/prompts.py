@@ -422,9 +422,15 @@ def call_llm(messages, temperature=None, max_tokens=None, system_prompt=None):
         return None
     
     try:
-        # ===== OPENAI PATH (Primary) =====
-        if LLM_PROVIDER == "openai" and openai_client:
-            logger.info("🟢 ATTEMPTING OpenAI API call...")
+        # Determine effective provider (if OpenAI requested but key missing, fallback to Groq)
+        effective_provider = LLM_PROVIDER.lower()
+        if effective_provider == "openai" and not openai_client:
+            logger.warning("⚠️ LLM_PROVIDER is 'openai' but OPENAI_API_KEY is missing. Redirecting primary provider to Groq.")
+            effective_provider = "groq"
+
+        # ===== OPENAI PATH (Primary if configured) =====
+        if effective_provider == "openai" and openai_client:
+            logger.info("🟢 ATTEMPTING OpenAI API call (primary)...")
             
             # Format messages for OpenAI
             openai_messages = []
