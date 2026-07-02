@@ -1652,7 +1652,12 @@ INTERVENTION_RQ_MAP = {
     "high_severity_warning": ("RQ2", "Enforce professional discussion tone"),
     "language_warning": ("RQ2", "Nudge respectful language privately"),
     "answer_question": ("RQ5", "Respond to student query and maintain flow"),
-    "ranking_disagreement": ("RQ4", "Resolve item/rank preference conflicts")
+    "ranking_disagreement": ("RQ4", "Resolve item/rank preference conflicts"),
+    "ranking_complete": ("RQ4", "Acknowledge finished ranking and steer towards group consensus"),
+    "ranking_refusal": ("RQ1", "De-escalate user refusal friction and ask for top choice"),
+    "participation_balance": ("RQ1", "Increase participation of quiet member"),
+    "conflict_deescalation": ("RQ2", "De-escalate tension and prompt compromise"),
+    "time_urgency": ("RQ4", "Promote focus on final submission near deadline")
 }
 
 def log_moderator_intervention(

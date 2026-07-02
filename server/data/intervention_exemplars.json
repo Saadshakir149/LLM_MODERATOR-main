@@ -1,0 +1,74 @@
+[
+  {
+    "intent": "ranking_complete",
+    "language": "ur",
+    "exemplar": "Shukriya {user}! Aap ki ranking complete ho gayi hai. Kya aap baaqi team members ki ranking se agree karte hain?",
+    "strategy": "Acknowledge finished ranking and pivot focus to group consensus."
+  },
+  {
+    "intent": "ranking_complete",
+    "language": "en",
+    "exemplar": "Thank you {user}! Your ranking has been saved. Do you agree with the rest of the team's choices?",
+    "strategy": "Acknowledge completion and steer towards group agreement."
+  },
+  {
+    "intent": "ranking_refusal",
+    "language": "ur",
+    "exemplar": "Koi baat nahi {user}! Aap poori list rank na karein, bas apna pasandeeda top 1 item share kar dein taake group aage barh sake.",
+    "strategy": "De-escalate pressure, validate feelings, and ask for simple top choice."
+  },
+  {
+    "intent": "ranking_refusal",
+    "language": "en",
+    "exemplar": "No problem at all {user}! You don't have to rank all items right now. Could you just share your thoughts on the top 1 item?",
+    "strategy": "Reduce friction and ask for minimal feedback."
+  },
+  {
+    "intent": "participation_balance",
+    "language": "ur",
+    "exemplar": "{target_user}, hum ne abhi tak aap ki awaaz nahi suni. Aap ka kya khayal hai is item ke baare mein?",
+    "strategy": "Directly invite quiet participant by name in Roman Urdu."
+  },
+  {
+    "intent": "participation_balance",
+    "language": "en",
+    "exemplar": "{target_user}, we haven't heard from you yet. What are your thoughts on this item?",
+    "strategy": "Politely call on quiet member in English."
+  },
+  {
+    "intent": "dominant_behavior",
+    "language": "ur",
+    "exemplar": "{user}, aap ne bohat achi participation ki! Aayein ab baki team members ki raye bhi sunte hain.",
+    "strategy": "Appreciate dominant member while redirecting floor to quiet members."
+  },
+  {
+    "intent": "dominant_behavior",
+    "language": "en",
+    "exemplar": "{user}, thank you for your great input! Let's hear from the rest of the team as well.",
+    "strategy": "Acknowledge dominant user and open space for others."
+  },
+  {
+    "intent": "conflict",
+    "language": "ur",
+    "exemplar": "Aayein shakhsiiyat ke bajaye ideas par fokus karein. Hum sab mil kar ek behtar list bana sakte hain.",
+    "strategy": "De-escalate argument and refocus team on task goals."
+  },
+  {
+    "intent": "conflict",
+    "language": "en",
+    "exemplar": "Let's focus on evaluating the items constructively. We all share the same goal!",
+    "strategy": "Calm team atmosphere and realign objectives."
+  },
+  {
+    "intent": "time_urgency",
+    "language": "ur",
+    "exemplar": "Hamare paas sirf {time_remaining} minute baaqi hain! Aayein 1 se 12 tak final ranking locked karein.",
+    "strategy": "Create gentle deadline urgency."
+  },
+  {
+    "intent": "time_urgency",
+    "language": "en",
+    "exemplar": "We have only {time_remaining} minutes left! Let's finalize our rankings from 1 to 12.",
+    "strategy": "Signal final wrap-up phase."
+  }
+]

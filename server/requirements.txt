@@ -13,13 +13,14 @@ gunicorn==21.2.0
 supabase==2.9.0
 httpx>=0.24.0,<0.28.0
 
-# === AI Services ===
+# === AI Services & Embeddings ===
 openai==1.3.0
 groq==0.9.0
+sentence-transformers>=2.2.2
+numpy>=1.24.0
+scikit-learn>=1.3.0
 
 # === Audio assembly (ADMIN conversation-recording export ONLY) ===
-# Pip-bundled static ffmpeg binary (no system install, no pydub). The realtime
-# /stt + chat paths do NOT use this; only GET /api/room/<id>/recording does.
 imageio-ffmpeg==0.5.1
 
 # === Data Handling ===
