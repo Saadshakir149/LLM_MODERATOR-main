@@ -43,10 +43,17 @@ def calculate_rms_energy(pcm_bytes: bytes) -> float:
     return math.sqrt(sum_squares / count)
 
 
+import os
+
+VAD_RMS_THRESHOLD = float(os.getenv("VAD_RMS_THRESHOLD", "100.0"))
+VAD_SPEECH_RATIO = float(os.getenv("VAD_SPEECH_RATIO", "0.20"))
+
+
 def is_speech(audio_bytes: bytes, sample_rate: int = 16000) -> bool:
     """
     Detect if audio contains speech.
     Uses WebRTC VAD if available; falls back to RMS energy thresholding.
+    Configurable via VAD_RMS_THRESHOLD and VAD_SPEECH_RATIO environment variables.
     """
     if not audio_bytes or len(audio_bytes) < 100:
         return False
@@ -67,13 +74,13 @@ def is_speech(audio_bytes: bytes, sample_rate: int = 16000) -> bool:
                 
             if total_frames > 0:
                 speech_ratio = speech_frames / total_frames
-                return speech_ratio >= 0.15
+                return speech_ratio >= VAD_SPEECH_RATIO
         except Exception as ex:
             logger.debug("webrtcvad error, fallback to RMS energy: %s", ex)
 
     # Fallback: RMS Energy Check
     rms = calculate_rms_energy(audio_bytes)
-    return rms >= 150.0  # Threshold for audible speech in 16-bit PCM
+    return rms >= VAD_RMS_THRESHOLD  # Threshold for audible speech in 16-bit PCM
 
 
 def denoise_audio(audio_bytes: bytes, sample_rate: int = 16000) -> bytes:

@@ -607,6 +607,7 @@ def send_moderator_message(
 # NOTE: in-memory + process-local (fine for the single-worker setup; would move to a
 # shared store if running multiple workers).
 room_language_votes: Dict[str, Dict[str, float]] = {}
+_stt_retry_tracker: Dict[str, int] = {}
 
 
 def update_room_language(room_id: str, language: str, confidence: float = 1.0) -> None:
@@ -4276,36 +4277,86 @@ def stt():
         raw_text = (res.text or "").strip()
 
         # ONE structured LLM call returns {language, confidence, normalized_text}.
-        # Pure English short-circuits with NO LLM call (zero added latency); any Urdu
-        # signal triggers classification + normalization to clean Roman Urdu (Latin).
-        # The faithful raw transcript is returned as raw_text and stored unchanged.
         _t_norm = time.time()
         result = classify_and_normalize(raw_text)
         _norm_ms = int((time.time() - _t_norm) * 1000)
         normalized = result["normalized_text"]
 
+        # Validate transcript integrity & calculate effective confidence
+        from transcription_validator import calculate_transcript_confidence
+        effective_confidence = calculate_transcript_confidence(raw_text, result)
+        
+        stt_threshold = float(os.getenv("STT_CONFIDENCE_THRESHOLD", "0.7"))
+        max_retries = 2
+        
+        room_id = request.form.get("room_id") or request.form.get("roomId")
+        user_name = request.form.get("user") or request.form.get("username") or "user"
+        retry_key = f"{room_id}:{user_name}" if room_id else audio_token
+        
+        current_retries = _stt_retry_tracker.get(retry_key, 0)
+        is_low_conf = effective_confidence < stt_threshold
+        should_retry = is_low_conf and current_retries < max_retries
+
         # The upload was running during transcription and is almost always done by
-        # now; wait briefly (not the full timeout) so the token is reliably usable.
+        # now; wait briefly so the token is reliably usable.
         staging_thread.join(timeout=1.5)
 
+        if should_retry:
+            _stt_retry_tracker[retry_key] = current_retries + 1
+            retry_lang = result.get("language", "ur")
+            retry_prompt = (
+                "Maaf kijiye, aap ki awaaz saaf nahi aayi. Kya aap dobara keh sakte hain?"
+                if retry_lang in ("ur", "roman_urdu")
+                else "Sorry, I couldn't hear that clearly. Could you please repeat?"
+            )
+            logger.warning(
+                f"⚠️ STT Low Confidence ({effective_confidence:.2f} < {stt_threshold}). "
+                f"Triggering retry {current_retries + 1}/{max_retries} for {user_name} in room {room_id}"
+            )
+            if room_id:
+                try:
+                    send_moderator_message(room_id, retry_prompt, "moderator")
+                except Exception as mod_err:
+                    logger.warning(f"Failed to send low confidence audio prompt: {mod_err}")
+
+            log_event(room_id, "stt_retry", {
+                "user": user_name,
+                "confidence": effective_confidence,
+                "retry_count": current_retries + 1,
+                "raw_text": raw_text
+            })
+            return jsonify({
+                "retry": True,
+                "retry_count": current_retries + 1,
+                "text": normalized,
+                "raw_text": raw_text,
+                "language": result["language"],
+                "confidence": effective_confidence,
+                "audio_token": audio_token,
+                "message": retry_prompt
+            })
+
+        # Reset retry tracker on success or after reaching max attempts
+        _stt_retry_tracker[retry_key] = 0
         _total_ms = int((time.time() - _t_req) * 1000)
         logger.info(
-            f"✅ STT result ({result['language']} {result['confidence']:.2f}) "
+            f"✅ STT result ({result['language']} conf={effective_confidence:.2f} low_conf={is_low_conf}) "
             f"[transcribe={_stt_ms}ms normalize={_norm_ms}ms total={_total_ms}ms]: {normalized[:50]}..."
         )
-        # Ground-truth event (8.4). No room_id on the STT request; room attribution
-        # happens when the resulting message is sent (linked via audio_token).
-        log_event(None, "stt", {
+        log_event(room_id, "stt", {
             "audio_token": audio_token,
             "language": result["language"],
-            "confidence": result["confidence"],
+            "confidence": effective_confidence,
+            "low_confidence": is_low_conf,
             "chars": len(normalized),
         })
         return jsonify({
+            "retry": False,
             "text": normalized,
             "raw_text": raw_text,
             "language": result["language"],
-            "confidence": result["confidence"],
+            "confidence": effective_confidence,
+            "low_confidence": is_low_conf,
             "audio_token": audio_token,
         })
 
